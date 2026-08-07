@@ -1,0 +1,29 @@
+# Vivado generated artifacts
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.runs/
+*.gen/
+.Xil/
+
+# Logs and temp files
+*.jou
+*.log
+*.str
+*.wdb
+*.backup.jou
+*.backup.log
+*.backup.xpr
+
+# Large binaries / data
+hv_control.exe
+test_data/
+*.dcp
+
+# Duplicate/old project copy
+Project/
+
+# OS
+.DS_Store
+Thumbs.db

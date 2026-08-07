@@ -1,0 +1,124 @@
+`timescale 1ns / 1ps
+
+// SPI 3线，16bit
+module spi_3wire_master_16bit_negedge #(
+    parameter CLK_DIV = 100  // 分频控制 SCLK 频率，实际输出频率 = clk / (2*CLK_DIV)
+) (
+    input             clk,      // FPGA 时钟
+    input             rst_n,    // 复位
+    input             start,    // 启动一次传输
+    input             rw,       // 0: 写，1: 读
+    input      [15:0] data_in,  // 准备好的用于写出的数据
+    output reg        busy,     // 忙标志
+    output reg        done,     // 完成标志
+    output reg        sclk,     // SPI 时钟
+    inout             sdio,     // 双向数据线
+
+    // debug输出
+    output reg        sdio_in,   // 读取的数据
+    output reg        sdio_out,  // 写出的数据
+    output reg [15:0] shift_reg,  // 一次完整的写出数据
+    output reg [ 3:0] bit_cnt,   // 位计数（操作到16bit的哪一位了）
+    output reg [ 1:0] state      // 状态
+);
+
+    // reg [15:0] shift_reg;
+    reg [ 7:0] clk_cnt;
+
+    assign sdio = ~rw ? sdio_out : 1'bz;
+
+    // ==============================
+    // SCLK 生成逻辑
+    // ==============================
+
+    // 每次计数到CLK_DIV翻转一次，2 * CLK_DIV个CLK周期完成一个SCLK周期
+    // 空闲时SCLK为低电平
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            clk_cnt <= 0;
+            sclk <= 0;
+        end else begin
+            if (busy) begin
+                if (clk_cnt == (CLK_DIV - 1)) begin
+                    clk_cnt <= 0;
+                    sclk <= ~sclk;
+                end else clk_cnt <= clk_cnt + 1;
+            end else begin
+                clk_cnt <= 0;
+                sclk <= 0;
+            end
+        end
+    end
+
+    // ==============================
+    // 状态
+    // ==============================
+    localparam IDLE = 2'b00;
+    localparam TRANSFER = 2'b01;
+    localparam WAIT_STATE = 2'b10;
+    localparam DONE_STATE = 2'b11;
+
+    // ==============================
+    // 二段式状态机
+    // ==============================
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= IDLE;
+            bit_cnt <= 0;
+            shift_reg <= 0;
+            sdio_out <= 0;
+            busy <= 0;
+            done <= 0;
+            // data_out <= 0;
+        end else begin
+            done <= 0;
+            case (state)
+                IDLE: begin
+                    busy <= 0;
+                    if (start) begin
+                        busy <= 1;
+                        shift_reg <= data_in;
+                        bit_cnt <= 4'd15;
+                        state <= TRANSFER;
+                    end
+                end
+
+                TRANSFER: begin
+                    // === 写数据 ===
+                    // 在SCLK上升沿准备数据
+                    if (~rw && clk_cnt == (CLK_DIV - 1) && sclk == 0) begin
+                        sdio_out <= shift_reg[bit_cnt];
+                    end
+
+                    // === 读数据 ===
+                    // 在SCLK下降沿采样
+                    if (rw && clk_cnt == (CLK_DIV - 1) && sclk == 1) begin
+                        shift_reg[bit_cnt] <= sdio;
+                        sdio_in <= sdio;
+                    end
+
+                    // === 位计数 ===
+                    if (clk_cnt == (CLK_DIV - 1) && sclk == 1) begin
+                        if (bit_cnt == 0) begin
+                            state <= WAIT_STATE;
+                            // data_out <= shift_reg;
+                        end else bit_cnt <= bit_cnt - 1;
+                    end
+                end
+
+                WAIT_STATE: begin
+                    // 等待SCLK上升沿快到来时
+                    if (clk_cnt == (CLK_DIV - 10) && sclk == 0) begin
+                        state <= DONE_STATE;
+                    end
+                end
+
+                DONE_STATE: begin
+                    done  <= 1;
+                    busy  <= 0;
+                    state <= IDLE;
+                end
+            endcase
+        end
+    end
+endmodule

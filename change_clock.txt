@@ -1,0 +1,2 @@
+si5345_write_config中：include 20M的配置；MMCM中将si5345_clk_in0改为20M
+ad9253_write_config中：reg_list[2]改为8'h50

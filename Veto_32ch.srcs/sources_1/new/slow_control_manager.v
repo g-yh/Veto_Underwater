@@ -1,13 +1,31 @@
-module uart_controller_32ch #(
+// slow_control_manager
+// 仿照 uart_controller_32ch.v 的状态机改写。
+// 区别：原来的慢控通过 UART(8bit 串行) 收发，现在改为通过 GT 收发。
+//
+// 跨时钟域：状态机运行在 rxoutclk 域（clk），发送数据通过内部异步 FIFO
+//   跨到 txoutclk 域（clk_tx），读侧自动消费，main 直接用 sc_fifo_dout/valid。
+//   数据格式（16bit）：data[15:8] = 板子编号，data[7:0] = 慢控数据/命令
+// brd_num：第一次收到慢控数据时锁存 user_rx_data[15:8]，
+//          之后再收到的数据高 8 位与 brd_num 匹配才处理。
+module slow_control_manager #(
     parameter ADC_NUM = 8,
     parameter CHANNEL_NUM = 4
 ) (
-    input wire clk,
-    input wire rst_n,
+    input  wire clk,       // rxoutclk 域（状态机 + FIFO 写侧）
+    input  wire clk_tx,    // txoutclk 域（FIFO 读侧）
+    input  wire rst_n,
 
-    // UART接口
-    input  wire uart_rx,
-    output wire uart_tx,
+    // GT 慢控收发接口
+    input  wire [15:0] user_rx_data,
+    input  wire        user_rx_data_valid,
+
+    // FIFO 读侧输出（txoutclk 域，供 main 接 GT user_tx_data）
+    output wire [15:0] sc_fifo_dout,
+    output wire        sc_fifo_valid,
+
+    // 标志
+    output wire        slow_control_active,   // 慢控传输进行中（state != IDLE）
+    output reg  [7:0]  brd_num,               // 锁存的板子编号
 
     // Si5345接口
     input  wire        si5345_spi_busy,
@@ -42,82 +60,42 @@ module uart_controller_32ch #(
     input  wire [ADC_NUM*CHANNEL_NUM*2*8-1:0] ad9253_data_chx,
     output reg  [    ADC_NUM*CHANNEL_NUM*2:0] bitslip_chx,
 
-    // idealy
+    // idelay
     output reg [ADC_NUM*CHANNEL_NUM*2*5-1:0] idelay_tap,
     output reg                               idelay_ld,
 
     // tdc
     input  wire [10*ADC_NUM*CHANNEL_NUM - 1:0] tdc_cali_in,
     input  wire [   ADC_NUM*CHANNEL_NUM - 1:0] tdc_cali_en,
-    output reg  [   ADC_NUM*CHANNEL_NUM - 1:0] cali_flag,
-
-    // data transmit相关
-    input  wire [7:0] fifo_async_out,
-    input  wire       fifo_async_empty,
-    output wire       uart_clk_buf,
-    output wire       uart_tx_data_transmit_done
+    output reg  [   ADC_NUM*CHANNEL_NUM - 1:0] cali_flag
 );
 
-    // UART接收器
-    wire       uart_working_rx;
-    wire [7:0] uart_data_rx;
-    wire       uart_data_valid;
+    //--------------------------------
+    // 接收侧：clk 接 clk_rxoutclk_bufg，user_rx_data/user_rx_data_valid
+    // 与 clk 同步（time_sync_manager 输出，位于 rxoutclk 域），无需同步。
+    //--------------------------------
+    wire rx_valid_pulse = user_rx_data_valid;    // 同步域内的有效脉冲
+    wire [7:0] rx_addr = user_rx_data[15:8];
+    wire [7:0] rx_data = user_rx_data[7:0];
 
-    uart_rx #(
-        .CLK_DIV(200)
-    ) u_uart_rx (
-        .clk    (clk),
-        .rst_n  (rst_n),
-        .uart_rx(uart_rx),
-        .data   (uart_data_rx),
-        .working(uart_working_rx)
-    );
-
-    // UART发送器
-    wire       uart_working_tx;
-    reg        uart_tx_start;
-    wire       uart_tx_done;
-    reg  [7:0] uart_data_tx;
-
-    uart_tx #(
-        .CLK_DIV(200)
-    ) u_uart_tx (
-        .clk         (clk),
-        .rst_n       (rst_n),
-        .data        (uart_data_tx),
-        .start       (uart_tx_start),
-        .working     (uart_working_tx),
-        .uart_tx     (uart_tx),
-        .uart_clk_buf(uart_clk_buf)
-    );
-
-    // 检测UART接收完成
-    reg uart_working_rx_dly;
-    reg uart_working_tx_dly;
+    // brd_num 锁存 + 板号匹配
+    reg brd_num_set;
+    wire addr_match = brd_num_set ? (rx_addr == brd_num) : 1'b1;
+    wire rx_use = rx_valid_pulse & addr_match;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            uart_working_rx_dly <= 0;
-            uart_working_tx_dly <= 0;
-        end else begin
-            uart_working_rx_dly <= uart_working_rx;
-            uart_working_tx_dly <= uart_working_tx;
+            brd_num    <= 8'd0;
+            brd_num_set <= 1'b0;
+        end else if (rx_valid_pulse && !brd_num_set) begin
+            brd_num     <= rx_addr;
+            brd_num_set <= 1'b1;
         end
     end
-
-    // 可以使用uart_data_rx 8位并行数据
-    assign uart_data_valid = uart_working_rx_dly & ~uart_working_rx;
-
-    // 输入的uart_data_tx 8位数据发送完成
-    assign uart_tx_done = uart_working_tx_dly & ~uart_working_tx;
-
-    // 通过uart传输adc数据完成标志，只在DATA_TRANSMIT状态有效
-    assign uart_tx_data_transmit_done = (state == DATA_TRANSMIT) ? uart_tx_done : 1'b0;
 
     //--------------------------------
     // 状态机
     //--------------------------------
-    // 状态定义
     localparam IDLE = 6'd0;
     localparam GET_SI5345_CONF_BYTES = 6'd1;
     localparam RECEIVE_SI5345_CONF_DATA = 6'd2;
@@ -125,7 +103,7 @@ module uart_controller_32ch #(
 
     localparam RECEIVE_SI5345_READ_DATA = 6'd4;
     localparam READ_SI5345_REG = 6'd5;
-    localparam UART_SEND_SI5345_DATA = 6'd6;
+    localparam SEND_SI5345_DATA = 6'd6;
 
     localparam GET_AD9253_NUM_WR = 6'd7;
     localparam GET_AD9253_CONF_BYTES = 6'd8;
@@ -135,11 +113,11 @@ module uart_controller_32ch #(
     localparam GET_AD9253_NUM_RD = 6'd11;
     localparam RECEIVE_AD9253_READ_DATA = 6'd12;
     localparam READ_AD9253_REG = 6'd13;
-    localparam UART_SEND_AD9253_DATA = 6'd14;
+    localparam SEND_AD9253_DATA = 6'd14;
 
     localparam GET_AD9253_BIT_SLIP_NUM = 6'd15;
     localparam AD9253_BIT_SLIP = 6'd16;
-    localparam UART_SEND_TEST_DATA = 6'd17;
+    localparam SEND_TEST_DATA = 6'd17;
 
     localparam GET_AD9253_IDELAY_NUM = 6'd18;
     localparam IDELAY = 6'd19;
@@ -154,18 +132,17 @@ module uart_controller_32ch #(
     localparam TDC_CALI = 6'd25;
     localparam TDC_CALI_SEND_DATA = 6'd26;
 
-    localparam DATA_TRANSMIT = 6'd31;
-
-
-    // 状态机信号
     reg  [ 5:0] state;
     reg  [ 5:0] next_state;
 
+    // 发送节拍：每个发送状态内对发出的字做 1 拍间隔
+    reg send_phase;   // 0=本拍发数据，1=间隔后退出
+
     // 计数器和控制信号
-    reg  [ 1:0] si5345_receive_conf_bytes_counter;  // 用于计数前两个字节
-    reg  [15:0] si5345_conf_bytes;  // 配置数据总字节数
-    reg  [15:0] si5345_byte_counter;  // 已接收的配置数据字节数
-    reg  [15:0] si5345_data_in_buffer;  // 临时存储待发送的16位数据
+    reg  [ 1:0] si5345_receive_conf_bytes_counter;
+    reg  [15:0] si5345_conf_bytes;
+    reg  [15:0] si5345_byte_counter;
+    reg  [15:0] si5345_data_in_buffer;
     reg         si5345_byte_half;
     reg         si5345_config_done;
     reg         si5345_read_done;
@@ -181,7 +158,6 @@ module uart_controller_32ch #(
     reg  [ 3:0] ad9253_num;
     reg  [ 7:0] ad9253_bit_slip_num;
     reg  [ 7:0] ad9253_idelay_num;
-    // reg         ad9253_config_done;
     reg  [31:0] adc_wait_cnt;
     wire [ 1:0] ad9253_fco_sel;
 
@@ -205,14 +181,13 @@ module uart_controller_32ch #(
     reg [ 7:0] cs_n_delay_counter;
     reg        cs_n_wait_flag;
 
-    reg [ 7:0] data_transmit_counter;
-
     reg [ 3:0] idelay_time_cnt;
     reg        idelay_done;
     reg        idelay_flag;
 
     reg        tdc_cali_done;
     reg [ 9:0] tdc_bin;
+    reg [ 7:0] tdc_bin_lo;   // 保留 TDC 低 8 位用于第二步发送
     reg [ 1:0] send_step;
     reg [ 4:0] tdc_num;
 
@@ -225,25 +200,23 @@ module uart_controller_32ch #(
         end
     end
 
+    assign slow_control_active = (state != IDLE);
 
     // 状态转移逻辑
     always @(*) begin
         case (state)
             IDLE: begin
-                if (uart_data_valid && uart_data_rx == 8'hF0) next_state = GET_SI5345_CONF_BYTES;
-                else if (uart_data_valid && uart_data_rx == 8'hF1)
+                if (rx_use && rx_data == 8'hF0) next_state = GET_SI5345_CONF_BYTES;
+                else if (rx_use && rx_data == 8'hF1)
                     next_state = RECEIVE_SI5345_READ_DATA;
-                else if (uart_data_valid && uart_data_rx == 8'hF2) next_state = GET_AD9253_NUM_WR;
-                else if (uart_data_valid && uart_data_rx == 8'hF3) next_state = GET_AD9253_NUM_RD;
-                else if (uart_data_valid && uart_data_rx == 8'hF4)
+                else if (rx_use && rx_data == 8'hF2) next_state = GET_AD9253_NUM_WR;
+                else if (rx_use && rx_data == 8'hF3) next_state = GET_AD9253_NUM_RD;
+                else if (rx_use && rx_data == 8'hF4)
                     next_state = GET_AD9253_BIT_SLIP_NUM;
-                else if (uart_data_valid && uart_data_rx == 8'hF5)
+                else if (rx_use && rx_data == 8'hF5)
                     next_state = GET_AD9253_IDELAY_NUM;
-                else if (uart_data_valid && uart_data_rx == 8'hF6) next_state = GET_DAC128S085_NUM;
-                else if (uart_data_valid && uart_data_rx == 8'hF7) next_state = GET_TDC_NUM;
-
-
-                else if (uart_data_valid && uart_data_rx == 8'hFD) next_state = DATA_TRANSMIT;
+                else if (rx_use && rx_data == 8'hF6) next_state = GET_DAC128S085_NUM;
+                else if (rx_use && rx_data == 8'hF7) next_state = GET_TDC_NUM;
                 else next_state = IDLE;
             end
 
@@ -253,7 +226,7 @@ module uart_controller_32ch #(
             end
 
             RECEIVE_SI5345_CONF_DATA: begin
-                if (si5345_byte_half == 1 && uart_data_valid) next_state = CONFIG_SI5345;
+                if (si5345_byte_half == 1 && rx_use) next_state = CONFIG_SI5345;
                 else next_state = RECEIVE_SI5345_CONF_DATA;
             end
 
@@ -265,24 +238,24 @@ module uart_controller_32ch #(
             end
 
             RECEIVE_SI5345_READ_DATA: begin
-                if (si5345_byte_half == 1 && uart_data_valid) next_state = READ_SI5345_REG;
+                if (si5345_byte_half == 1 && rx_use) next_state = READ_SI5345_REG;
                 else next_state = RECEIVE_SI5345_READ_DATA;
             end
 
             READ_SI5345_REG: begin
                 if (si5345_spi_done) begin
-                    if (si5345_byte_counter >= 4'd8) next_state = UART_SEND_SI5345_DATA;
+                    if (si5345_read_done) next_state = SEND_SI5345_DATA;
                     else next_state = RECEIVE_SI5345_READ_DATA;
                 end else next_state = READ_SI5345_REG;
             end
 
-            UART_SEND_SI5345_DATA: begin
-                if (uart_tx_done) next_state = IDLE;
-                else next_state = UART_SEND_SI5345_DATA;
+            SEND_SI5345_DATA: begin
+                if (send_phase == 1'b1) next_state = IDLE;
+                else next_state = SEND_SI5345_DATA;
             end
 
             GET_AD9253_NUM_WR: begin
-                if (uart_data_valid) next_state = GET_AD9253_CONF_BYTES;
+                if (rx_use) next_state = GET_AD9253_CONF_BYTES;
                 else next_state = GET_AD9253_NUM_WR;
             end
 
@@ -292,13 +265,12 @@ module uart_controller_32ch #(
             end
 
             RECEIVE_AD9253_CONF_DATA: begin
-                if (ad9253_byte_three == 2 && uart_data_valid)
-                    next_state = CONFIG_AD9253;  // 接收到3个字节，准备发送
+                if (ad9253_byte_three == 2 && rx_use)
+                    next_state = CONFIG_AD9253;
                 else next_state = RECEIVE_AD9253_CONF_DATA;
             end
 
             CONFIG_AD9253: begin
-                // if (ad9253_spi_done && ad9253_byte_three == 2) begin
                 if (ad9253_loop_done) begin
                     if (ad9253_byte_counter >= ad9253_conf_bytes)
                         next_state = WAIT_AD9253_CONFIG_DONE;
@@ -312,47 +284,47 @@ module uart_controller_32ch #(
             end
 
             GET_AD9253_NUM_RD: begin
-                if (uart_data_valid) next_state = RECEIVE_AD9253_READ_DATA;
+                if (rx_use) next_state = RECEIVE_AD9253_READ_DATA;
                 else next_state = GET_AD9253_NUM_RD;
             end
 
             RECEIVE_AD9253_READ_DATA: begin
-                if (ad9253_byte_three == 1 && uart_data_valid) next_state = READ_AD9253_REG;
+                if (ad9253_byte_three == 1 && rx_use) next_state = READ_AD9253_REG;
                 else next_state = RECEIVE_AD9253_READ_DATA;
             end
 
             READ_AD9253_REG: begin
-                if (ad9253_read_done) next_state = UART_SEND_AD9253_DATA;
+                if (ad9253_read_done) next_state = SEND_AD9253_DATA;
                 else next_state = READ_AD9253_REG;
             end
 
-            UART_SEND_AD9253_DATA: begin
-                if (uart_tx_done) next_state = IDLE;
-                else next_state = UART_SEND_AD9253_DATA;
+            SEND_AD9253_DATA: begin
+                if (send_phase == 1'b1) next_state = IDLE;
+                else next_state = SEND_AD9253_DATA;
             end
 
             GET_AD9253_BIT_SLIP_NUM: begin
-                if (uart_data_valid) next_state = AD9253_BIT_SLIP;
+                if (rx_use) next_state = AD9253_BIT_SLIP;
                 else next_state = GET_AD9253_BIT_SLIP_NUM;
             end
 
             AD9253_BIT_SLIP: begin
-                if (ad9253_fco_cnt == 4'd15) next_state = UART_SEND_TEST_DATA;
+                if (ad9253_fco_cnt == 4'd15) next_state = SEND_TEST_DATA;
                 else next_state = AD9253_BIT_SLIP;
             end
 
-            UART_SEND_TEST_DATA: begin
-                if (uart_tx_done) next_state = IDLE;
-                else next_state = UART_SEND_TEST_DATA;
+            SEND_TEST_DATA: begin
+                if (send_phase == 1'b1) next_state = IDLE;
+                else next_state = SEND_TEST_DATA;
             end
 
             GET_DAC128S085_NUM: begin
-                if (uart_data_valid) next_state = RECEIVE_DAC128S085_CONF_DATA;
+                if (rx_use) next_state = RECEIVE_DAC128S085_CONF_DATA;
                 else next_state = GET_DAC128S085_NUM;
             end
 
             RECEIVE_DAC128S085_CONF_DATA: begin
-                if (dac128s085_byte_half == 1 && uart_data_valid) next_state = CONFIG_DAC128S085;
+                if (dac128s085_byte_half == 1 && rx_use) next_state = CONFIG_DAC128S085;
                 else next_state = RECEIVE_DAC128S085_CONF_DATA;
             end
 
@@ -361,13 +333,8 @@ module uart_controller_32ch #(
                 else next_state = CONFIG_DAC128S085;
             end
 
-            DATA_TRANSMIT: begin
-                if (uart_data_valid && uart_data_rx == 8'hFE) next_state = IDLE;
-                else next_state = DATA_TRANSMIT;
-            end
-
             GET_AD9253_IDELAY_NUM: begin
-                if (uart_data_valid) next_state = IDELAY;
+                if (rx_use) next_state = IDELAY;
                 else next_state = GET_AD9253_IDELAY_NUM;
             end
 
@@ -377,7 +344,7 @@ module uart_controller_32ch #(
             end
 
             GET_TDC_NUM: begin
-                if (uart_data_valid) next_state = TDC_CALI;
+                if (rx_use) next_state = TDC_CALI;
                 else next_state = GET_TDC_NUM;
             end
 
@@ -432,15 +399,12 @@ module uart_controller_32ch #(
             dac128s085_num <= 0;
             dac128s085_data_in <= 0;
 
-            uart_tx_start <= 0;
             cs_n_wait_flag <= 0;
             cs_n_delay_counter <= 0;
             bitslip_chx <= 0;
             adc_wait_cnt <= 0;
 
             ad9253_config_done <= 0;
-
-            data_transmit_counter <= 0;
 
             idelay_tap <= 0;
             idelay_ld <= 0;
@@ -451,8 +415,14 @@ module uart_controller_32ch #(
             tdc_cali_done <= 0;
             cali_flag <= 0;
             tdc_bin <= 0;
+            tdc_bin_lo <= 0;
             send_step <= 0;
             tdc_num <= 0;
+
+            // 发送
+            send_phase <= 1'b0;
+            slow_control_data <= 16'd0;
+            slow_control_data_valid <= 1'b0;
         end else begin
             case (state)
                 IDLE: begin
@@ -490,16 +460,12 @@ module uart_controller_32ch #(
                     dac128s085_num <= 0;
                     dac128s085_data_in <= 0;
 
-                    uart_tx_start <= 0;
                     cs_n_wait_flag <= 0;
                     cs_n_delay_counter <= 0;
 
                     bitslip_chx <= 0;
                     adc_wait_cnt <= 0;
 
-                    data_transmit_counter <= 0;
-
-                    // idelay_tap <= 0;
                     idelay_ld <= 0;
                     idelay_time_cnt <= 0;
                     idelay_done <= 0;
@@ -510,25 +476,29 @@ module uart_controller_32ch #(
                     tdc_bin <= 0;
                     send_step <= 0;
                     tdc_num <= 0;
+
+                    // 发送
+                    send_phase <= 1'b0;
+                    slow_control_data_valid <= 1'b0;
                 end
 
                 GET_SI5345_CONF_BYTES: begin
-                    if (si5345_receive_conf_bytes_counter == 0 && uart_data_valid) begin
-                        si5345_conf_bytes[15:8] <= uart_data_rx;
+                    if (si5345_receive_conf_bytes_counter == 0 && rx_use) begin
+                        si5345_conf_bytes[15:8] <= rx_data;
                         si5345_receive_conf_bytes_counter <= si5345_receive_conf_bytes_counter + 1;
-                    end else if (si5345_receive_conf_bytes_counter == 1 && uart_data_valid) begin
-                        si5345_conf_bytes[7:0] <= uart_data_rx;
+                    end else if (si5345_receive_conf_bytes_counter == 1 && rx_use) begin
+                        si5345_conf_bytes[7:0] <= rx_data;
                         si5345_receive_conf_bytes_counter <= si5345_receive_conf_bytes_counter + 1;
                     end
                 end
 
                 RECEIVE_SI5345_CONF_DATA: begin
-                    if (si5345_byte_counter < si5345_conf_bytes && uart_data_valid) begin
+                    if (si5345_byte_counter < si5345_conf_bytes && rx_use) begin
                         if (si5345_byte_half == 0) begin
-                            si5345_data_in_buffer[15:8] <= uart_data_rx;
+                            si5345_data_in_buffer[15:8] <= rx_data;
                             si5345_byte_half <= 1;
                         end else begin
-                            si5345_data_in_buffer[7:0] <= uart_data_rx;
+                            si5345_data_in_buffer[7:0] <= rx_data;
                             si5345_byte_half <= 0;
                         end
                         si5345_byte_counter <= si5345_byte_counter + 1;
@@ -536,12 +506,10 @@ module uart_controller_32ch #(
                 end
 
                 CONFIG_SI5345: begin
-                    // 设置SPI参数
                     si5345_data_in <= si5345_data_in_buffer;
                     si5345_rw <= 0;
                     si5345_cs_n <= 0;
 
-                    // 控制start信号
                     if (!si5345_spi_busy && next_state == CONFIG_SI5345) begin
                         si5345_spi_start <= 1;
                     end else begin
@@ -552,19 +520,18 @@ module uart_controller_32ch #(
                         si5345_cs_n <= 1;
                     end
 
-                    // 检查是否接收完所有数据
                     if (si5345_byte_counter >= si5345_conf_bytes && si5345_spi_done) begin
                         si5345_config_done <= 1;
                     end
                 end
 
                 RECEIVE_SI5345_READ_DATA: begin
-                    if (si5345_byte_counter < 4'd8 && uart_data_valid) begin
+                    if (si5345_byte_counter < 4'd8 && rx_use) begin
                         if (si5345_byte_half == 0) begin
-                            si5345_data_in_buffer[15:8] <= uart_data_rx;
+                            si5345_data_in_buffer[15:8] <= rx_data;
                             si5345_byte_half <= 1;
                         end else begin
-                            si5345_data_in_buffer[7:0] <= uart_data_rx;
+                            si5345_data_in_buffer[7:0] <= rx_data;
                             si5345_byte_half <= 0;
                         end
                         si5345_byte_counter <= si5345_byte_counter + 1;
@@ -590,48 +557,48 @@ module uart_controller_32ch #(
                     end
 
                     if (si5345_byte_counter >= 4'd8 && si5345_spi_done) begin
-                        uart_data_tx <= si5345_data_out[7:0];
                         si5345_read_done <= 1;
                     end
                 end
 
-                UART_SEND_SI5345_DATA: begin
-                    if(~uart_working_tx && ~uart_working_tx_dly && next_state == UART_SEND_SI5345_DATA) begin
-                        uart_tx_start <= 1;
+                SEND_SI5345_DATA: begin
+                    // 发一个 16bit 字 {brd_num, si5345 读回数据}
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {brd_num, si5345_data_out[7:0]};
+                        slow_control_data_valid <= 1'b1;
+                        send_phase              <= 1'b1;
                     end else begin
-                        uart_tx_start <= 0;
+                        slow_control_data_valid <= 1'b0;
+                        send_phase              <= 1'b0;
                     end
                 end
 
                 GET_AD9253_NUM_WR: begin
-                    if (uart_data_valid) begin
-                        ad9253_num <= uart_data_rx;
+                    if (rx_use) begin
+                        ad9253_num <= rx_data;
                     end
                 end
 
                 GET_AD9253_CONF_BYTES: begin
-                    if (ad9253_receive_conf_bytes_counter == 0 && uart_data_valid) begin
-                        ad9253_conf_bytes[15:8] <= uart_data_rx;
+                    if (ad9253_receive_conf_bytes_counter == 0 && rx_use) begin
+                        ad9253_conf_bytes[15:8] <= rx_data;
                         ad9253_receive_conf_bytes_counter <= ad9253_receive_conf_bytes_counter + 1;
-                    end else if (ad9253_receive_conf_bytes_counter == 1 && uart_data_valid) begin
-                        ad9253_conf_bytes[7:0] <= uart_data_rx;
+                    end else if (ad9253_receive_conf_bytes_counter == 1 && rx_use) begin
+                        ad9253_conf_bytes[7:0] <= rx_data;
                         ad9253_receive_conf_bytes_counter <= ad9253_receive_conf_bytes_counter + 1;
                     end
                 end
 
                 RECEIVE_AD9253_CONF_DATA: begin
-                    if (ad9253_byte_counter < ad9253_conf_bytes && uart_data_valid) begin
+                    if (ad9253_byte_counter < ad9253_conf_bytes && rx_use) begin
                         if (ad9253_byte_three == 0) begin
-                            // 第一个字节
-                            ad9253_data_in_buffer[7:0] <= uart_data_rx;
+                            ad9253_data_in_buffer[7:0] <= rx_data;
                             ad9253_byte_three <= 1;
                         end else if (ad9253_byte_three == 1) begin
-                            // 第二个字节
-                            ad9253_data_in_buffer[15:8] <= uart_data_rx;
+                            ad9253_data_in_buffer[15:8] <= rx_data;
                             ad9253_byte_three <= 2;
                         end else begin
-                            // 第三个字节
-                            ad9253_data_in_buffer[23:16] <= uart_data_rx;
+                            ad9253_data_in_buffer[23:16] <= rx_data;
                             ad9253_byte_three <= 0;
                         end
                         ad9253_byte_counter <= ad9253_byte_counter + 1;
@@ -676,7 +643,6 @@ module uart_controller_32ch #(
                         end
 
                         if (ad9253_spi_done) begin
-                            // 启动延时计数
                             cs_n_wait_flag <= 1;
                             cs_n_delay_counter <= 0;
                         end
@@ -684,7 +650,7 @@ module uart_controller_32ch #(
                             if (cs_n_delay_counter < 199) begin
                                 cs_n_delay_counter <= cs_n_delay_counter + 1;
                             end else begin
-                                ad9253_cs_n[ad9253_num] <= 1;  // 延时结束，释放片选
+                                ad9253_cs_n[ad9253_num] <= 1;
                                 ad9253_byte_three <= 0;
                                 cs_n_wait_flag <= 0;
                                 cs_n_delay_counter <= 0;
@@ -703,20 +669,18 @@ module uart_controller_32ch #(
                 end
 
                 GET_AD9253_NUM_RD: begin
-                    if (uart_data_valid) begin
-                        ad9253_num <= uart_data_rx;
+                    if (rx_use) begin
+                        ad9253_num <= rx_data;
                     end
                 end
 
                 RECEIVE_AD9253_READ_DATA: begin
-                    if (uart_data_valid) begin
+                    if (rx_use) begin
                         if (ad9253_byte_three == 0) begin
-                            // 第一个字节
-                            ad9253_data_in_buffer[7:0] <= uart_data_rx;
+                            ad9253_data_in_buffer[7:0] <= rx_data;
                             ad9253_byte_three <= 1;
                         end else if (ad9253_byte_three == 1) begin
-                            // 第二个字节
-                            ad9253_data_in_buffer[15:8] <= uart_data_rx;
+                            ad9253_data_in_buffer[15:8] <= rx_data;
                             ad9253_byte_three <= 0;
                         end
                     end
@@ -760,8 +724,6 @@ module uart_controller_32ch #(
                         end
 
                         if (ad9253_spi_done) begin
-                            uart_data_tx <= ad9253_data_out;
-                            // 启动延时计数
                             cs_n_wait_flag <= 1;
                             cs_n_delay_counter <= 0;
                         end
@@ -769,7 +731,7 @@ module uart_controller_32ch #(
                             if (cs_n_delay_counter < 199) begin
                                 cs_n_delay_counter <= cs_n_delay_counter + 1;
                             end else begin
-                                ad9253_cs_n[ad9253_num] <= 1;  // 延时结束，释放片选
+                                ad9253_cs_n[ad9253_num] <= 1;
                                 ad9253_byte_three <= 0;
                                 cs_n_wait_flag <= 0;
                                 cs_n_delay_counter <= 0;
@@ -779,17 +741,20 @@ module uart_controller_32ch #(
                     end
                 end
 
-                UART_SEND_AD9253_DATA: begin
-                    if(~uart_working_tx && ~uart_working_tx_dly && next_state == UART_SEND_AD9253_DATA) begin
-                        uart_tx_start <= 1;
+                SEND_AD9253_DATA: begin
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {brd_num, ad9253_data_out[7:0]};
+                        slow_control_data_valid <= 1'b1;
+                        send_phase              <= 1'b1;
                     end else begin
-                        uart_tx_start <= 0;
+                        slow_control_data_valid <= 1'b0;
+                        send_phase              <= 1'b0;
                     end
                 end
 
                 GET_AD9253_BIT_SLIP_NUM: begin
-                    if (uart_data_valid) begin
-                        ad9253_bit_slip_num <= uart_data_rx;
+                    if (rx_use) begin
+                        ad9253_bit_slip_num <= rx_data;
                     end
                 end
 
@@ -800,24 +765,26 @@ module uart_controller_32ch #(
                     end
                 end
 
-                UART_SEND_TEST_DATA: begin
-                    uart_data_tx <= ad9253_data_chx[ad9253_bit_slip_num*8+:8];
-                    if(~uart_working_tx && ~uart_working_tx_dly && next_state == UART_SEND_TEST_DATA) begin
-                        uart_tx_start <= 1;
+                SEND_TEST_DATA: begin
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {brd_num, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
+                        slow_control_data_valid <= 1'b1;
+                        send_phase              <= 1'b1;
                     end else begin
-                        uart_tx_start <= 0;
+                        slow_control_data_valid <= 1'b0;
+                        send_phase              <= 1'b0;
                     end
                 end
 
                 GET_AD9253_IDELAY_NUM: begin
-                    if (uart_data_valid) begin
-                        ad9253_idelay_num <= uart_data_rx;
+                    if (rx_use) begin
+                        ad9253_idelay_num <= rx_data;
                     end
                 end
 
                 IDELAY: begin
-                    if (uart_data_valid) begin
-                        idelay_tap[ad9253_idelay_num*5+:5] <= uart_data_rx;
+                    if (rx_use) begin
+                        idelay_tap[ad9253_idelay_num*5+:5] <= rx_data;
                         idelay_ld <= 1;
                         idelay_flag <= 1;
                     end
@@ -831,29 +798,27 @@ module uart_controller_32ch #(
                 end
 
                 GET_DAC128S085_NUM: begin
-                    if (uart_data_valid) begin
-                        dac128s085_num <= uart_data_rx;
+                    if (rx_use) begin
+                        dac128s085_num <= rx_data;
                     end
                 end
 
                 RECEIVE_DAC128S085_CONF_DATA: begin
-                    if (uart_data_valid) begin
+                    if (rx_use) begin
                         if (dac128s085_byte_half == 0) begin
-                            dac128s085_data_in_buffer[15:8] <= uart_data_rx;
+                            dac128s085_data_in_buffer[15:8] <= rx_data;
                             dac128s085_byte_half <= 1;
                         end else begin
-                            dac128s085_data_in_buffer[7:0] <= uart_data_rx;
+                            dac128s085_data_in_buffer[7:0] <= rx_data;
                             dac128s085_byte_half <= 0;
                         end
                     end
                 end
 
                 CONFIG_DAC128S085: begin
-                    // 设置SPI参数
                     dac128s085_data_in[dac128s085_num*16+:16] <= dac128s085_data_in_buffer;
                     dac128s085_cs_n[dac128s085_num] <= 0;
 
-                    // 控制start信号
                     if (!dac128s085_spi_busy[dac128s085_num] && next_state == CONFIG_DAC128S085) begin
                         dac128s085_spi_start[dac128s085_num] <= 1;
                     end else begin
@@ -870,50 +835,49 @@ module uart_controller_32ch #(
                 end
 
                 GET_TDC_NUM: begin
-                    if (uart_data_valid) begin
-                        tdc_num <= uart_data_rx;
+                    if (rx_use) begin
+                        tdc_num <= rx_data;
                     end
                 end
 
                 TDC_CALI: begin
                     cali_flag[tdc_num] <= 1;
                     if (tdc_cali_en[tdc_num]) begin
-                        tdc_bin <= tdc_cali_in[10*tdc_num+:10];
+                        tdc_bin    <= tdc_cali_in[10*tdc_num+:10];
+                        tdc_bin_lo <= tdc_cali_in[10*tdc_num+:8];
                     end
                 end
 
                 TDC_CALI_SEND_DATA: begin
-                    uart_tx_start <= 0;
+                    slow_control_data_valid <= 1'b0;
 
                     case (send_step)
                         2'd0: begin
-                            if (!uart_working_tx && !tdc_cali_done) begin
-                                uart_data_tx  <= {6'b0, tdc_bin[9:8]};
-                                uart_tx_start <= 1'b1;
-                            end
-                            if (uart_working_tx) begin
-                                send_step <= 2'd1;
+                            if (!tdc_cali_done) begin
+                                slow_control_data       <= {brd_num, 6'b0, tdc_bin[9:8]};
+                                slow_control_data_valid <= 1'b1;
+                                send_step               <= 2'd1;
                             end
                         end
 
                         2'd1: begin
-                            if (!uart_working_tx) begin
+                            if (!slow_control_data_valid) begin
                                 send_step <= 2'd2;
                             end
                         end
 
                         2'd2: begin
-                            if (!uart_working_tx) begin
-                                uart_data_tx  <= tdc_bin[7:0];
-                                uart_tx_start <= 1'b1;
+                            if (!slow_control_data_valid) begin
+                                slow_control_data       <= {brd_num, tdc_bin_lo};
+                                slow_control_data_valid <= 1'b1;
                             end
-                            if (uart_working_tx) begin
+                            if (slow_control_data_valid) begin
                                 send_step <= 2'd3;
                             end
                         end
 
                         2'd3: begin
-                            if (!uart_working_tx) begin
+                            if (!slow_control_data_valid) begin
                                 tdc_cali_done <= 1'b1;
                                 send_step     <= 2'd0;
                             end
@@ -921,14 +885,6 @@ module uart_controller_32ch #(
                     endcase
                 end
 
-                DATA_TRANSMIT: begin
-                    uart_data_tx <= fifo_async_out;
-                    if (~uart_working_tx && ~fifo_async_empty) begin
-                        uart_tx_start <= 1;
-                    end else begin
-                        uart_tx_start <= 0;
-                    end
-                end
             endcase
         end
     end
@@ -936,4 +892,38 @@ module uart_controller_32ch #(
     wire [4:0] current_idelay_tap;
 
     assign current_idelay_tap = idelay_tap[ad9253_idelay_num*5+:5];
+
+    //--------------------------------
+    // 发送 FIFO：rxoutclk 写，txoutclk 读
+    //--------------------------------
+    reg [15:0] slow_control_data;
+    reg        slow_control_data_valid;
+    wire       sc_fifo_full;
+    wire       sc_fifo_empty;
+    wire       sc_fifo_rd_en;
+
+    fifo_slow_control u_fifo_slow_control (
+        .rst        (~rst_n),
+        .wr_clk     (clk),          // rxoutclk
+        .rd_clk     (clk_tx),       // txoutclk
+        .din        (slow_control_data),
+        .wr_en      (slow_control_data_valid & ~sc_fifo_full),
+        .rd_en      (sc_fifo_rd_en),
+        .dout       (sc_fifo_dout),
+        .full       (sc_fifo_full),
+        .empty      (sc_fifo_empty),
+        .wr_rst_busy(),
+        .rd_rst_busy()
+    );
+
+    // 标准模式：dout 在 rd_en 后一拍才呈现，valid 延迟一拍对齐
+    assign sc_fifo_rd_en = ~sc_fifo_empty;
+    reg sc_fifo_valid_r;
+    always @(posedge clk_tx or negedge rst_n) begin
+        if (!rst_n)
+            sc_fifo_valid_r <= 1'b0;
+        else
+            sc_fifo_valid_r <= ~sc_fifo_empty;
+    end
+    assign sc_fifo_valid = sc_fifo_valid_r;
 endmodule

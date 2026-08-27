@@ -79,8 +79,8 @@ module main_32ch (
     // output wire SFP2_tx_p,  // SFP send
     // SFP2_tx_n,
 
-    input wire gt_refclk_15625_p,
-    input wire gt_refclk_15625_n,
+    // input wire gt_refclk_15625_p,
+    // input wire gt_refclk_15625_n,
 
     output wire SFP_tx_disable1,  // set low
     output wire SFP_tx_disable2,  // set low
@@ -98,15 +98,15 @@ module main_32ch (
     assign SFP_tx_disable1 = 0;
     assign SFP_tx_disable2 = 0;
     assign gt_link_up_out = gt_link_up;
+    // UART 慢控已改为 GT 慢控，uart 端口不再使用
+    assign uart_tx = 1'b1;
 
     wire rst_n;
     wire trig_rst_n;
-    wire tdc_trig_flag;
     (* dont_touch="true" *) vio_0 vio_inst (
         .clk       (clk_200M),            // input wire clk
         .probe_out0(rst_n),
-        .probe_out1(trig_rst_n),
-        .probe_out2(tdc_trig_flag)
+        .probe_out1(trig_rst_n)
     );
 
     //--------------------------------
@@ -167,7 +167,7 @@ module main_32ch (
     spi_3wire_master_16bit #(
         .CLK_DIV(100)
     ) si5345_spi_inst (
-        .clk    (clk_200M),
+        .clk    (clk_rxoutclk_bufg),
         .rst_n  (rst_n),
         .start  (si5345_spi_start),
         .rw     (si5345_rw),
@@ -211,10 +211,13 @@ module main_32ch (
     wire [ADC_NUM*CHANNEL_NUM*2*5-1:0] idelay_tap;
     wire                               idelay_ld;
 
-    wire                               adc_fco;
+    // ADC 帧时钟：统一由 GT 接收时钟驱动
+    wire adc_fco;
+    assign adc_fco = clk_rxoutclk_bufg;
 
     ad9253_selectio_top ad9253_selectio_top_inst (
-        .clk      (clk_200M),
+        .spi_clk          (clk_rxoutclk_bufg),
+        .selectio_ref_clk (clk_200M),
         .rst_n    (si5345_lolb && (&ad9253_config_done) && rst_n),
         .spi_rst_n(rst_n),
 
@@ -265,7 +268,7 @@ module main_32ch (
             spi_3wire_master_16bit_negedge #(
                 .CLK_DIV(100)
             ) dac128s085_spi_inst (
-                .clk    (clk_200M),
+                .clk    (clk_rxoutclk_bufg),
                 .rst_n  (rst_n),
                 .start  (dac128s085_spi_start[dac_num]),
                 .rw     (0),
@@ -299,30 +302,6 @@ module main_32ch (
         end
     endgenerate
 
-    // // 同步和边沿检测逻辑
-    // reg [ADC_NUM*CHANNEL_NUM-1:0] max40026_sync1, max40026_sync2;
-    // wire [ADC_NUM*CHANNEL_NUM-1:0] max40026_ch_pos_edge;  // 各通道上升沿脉冲
-    // wire [ADC_NUM*CHANNEL_NUM-1:0] max40026_ch_neg_edge;  // 各通道下降沿脉冲
-
-    // genvar n;
-    // generate
-    //     for (n = 0; n < ADC_NUM * CHANNEL_NUM; n = n + 1) begin : max40026_edge_detect_gen
-    //         always @(posedge adc_fco or negedge rst_n) begin
-    //             if (!rst_n) begin
-    //                 max40026_sync1[n] <= 0;
-    //                 max40026_sync2[n] <= 0;
-    //             end else begin
-    //                 max40026_sync1[n] <= max40026_ch[n];
-    //                 max40026_sync2[n] <= max40026_sync1[n];
-    //             end
-    //         end
-
-    //         // 边沿检测逻辑
-    //         assign max40026_ch_pos_edge[n] = ~max40026_sync2[n] & max40026_sync1[n];  // 上升沿
-    //         assign max40026_ch_neg_edge[n] = max40026_sync2[n] & ~max40026_sync1[n];  // 下降沿
-    //     end
-    // endgenerate
-
     //--------------------------------
     // tdc
     //--------------------------------
@@ -330,26 +309,22 @@ module main_32ch (
     wire [11*ADC_NUM*CHANNEL_NUM - 1:0] tdc_raw_fall;
     wire [     ADC_NUM*CHANNEL_NUM-1:0] tdc_signal;
 
+    wire [10*ADC_NUM*CHANNEL_NUM - 1:0] tdc_cali_in;
+    wire [   ADC_NUM*CHANNEL_NUM - 1:0] tdc_cali_en;
+
     wire [     ADC_NUM*CHANNEL_NUM-1:0] cali_flag;
     reg  [                         3:0] cali_cnt;
     reg                                 cali_pulse;
 
-    wire [   ADC_NUM*CHANNEL_NUM - 1:0] fifo_tdc_empty;
-    wire [   ADC_NUM*CHANNEL_NUM - 1:0] fifo_tdc_full;
-    wire [   ADC_NUM*CHANNEL_NUM - 1:0] fifo_tdc_valid;
-    wire [   ADC_NUM*CHANNEL_NUM - 1:0] fifo_tdc_wr_en;
-    wire [   ADC_NUM*CHANNEL_NUM - 1:0] fifo_tdc_rd_en;
-    wire [10*ADC_NUM*CHANNEL_NUM - 1:0] fifo_tdc_dout;
+    // IBUFDS_GTE2 ibufds_gte2_inst (
+    //     .I    (gt_refclk_15625_p),
+    //     .IB   (gt_refclk_15625_n),
+    //     .CEB  (1'b0),
+    //     .O    (clk_15625M),
+    //     .ODIV2()
+    // );
 
-    IBUFDS_GTE2 ibufds_gte2_inst (
-        .I    (gt_refclk_15625_p),
-        .IB   (gt_refclk_15625_n),
-        .CEB  (1'b0),
-        .O    (clk_15625M),
-        .ODIV2()
-    );
-
-    always @(posedge clk_15625M or negedge rst_n) begin
+    always @(posedge clk_200M or negedge rst_n) begin
         if (!rst_n) begin
             cali_cnt   <= 4'd0;
             cali_pulse <= 1'b0;
@@ -383,72 +358,23 @@ module main_32ch (
                 .tdc_raw_fall(tdc_raw_fall[tdc_gen*11+:11])
             );
 
-            assign fifo_tdc_wr_en[tdc_gen] = tdc_raw_rise[tdc_gen*11+10] && ~fifo_tdc_full[tdc_gen] && cali_flag[tdc_gen];
-            assign fifo_tdc_rd_en[tdc_gen] = ~fifo_tdc_empty[tdc_gen];
-
-            fifo_tdc fifo_tdc_inst (
-                .rst(~(si5345_lolb && (&ad9253_config_done) && rst_n)),  // input wire rst
-                .wr_clk(adc_fco),  // input wire wr_clk
-                .rd_clk(clk_200M),  // input wire rd_clk
-                .din(tdc_raw_rise[tdc_gen*11+:10]),  // input wire [9 : 0] din
-                .wr_en(fifo_tdc_wr_en[tdc_gen]),  // input wire wr_en
-                .rd_en(fifo_tdc_rd_en[tdc_gen]),  // input wire rd_en
-                .dout(fifo_tdc_dout[tdc_gen*10+:10]),  // output wire [9 : 0] dout
-                .full(fifo_tdc_full[tdc_gen]),  // output wire full
-                .empty(fifo_tdc_empty[tdc_gen]),  // output wire empty
-                .valid(fifo_tdc_valid[tdc_gen]),  // output wire valid
-                .wr_rst_busy(),  // output wire wr_rst_busy
-                .rd_rst_busy()  // output wire rd_rst_busy
-            );
+            assign tdc_cali_in[tdc_gen*10+:10] = tdc_raw_rise[tdc_gen*11+:10];
+            assign tdc_cali_en[tdc_gen]         = tdc_raw_rise[tdc_gen*11+10];
         end
     endgenerate
-
-    // ila_tdc ila_tdc_inst (
-    //     .clk       (clk_200M),
-    //     .probe0    (tdc_signal),
-    //     .probe1    (tdc_raw_rise),
-    //     .probe2    (tdc_raw_fall),
-    //     .probe3    (cali_pulse),
-    //     .probe4    (cali_flag)
-    // );
-
 
     //--------------------------------
     // ringbuffer
     //--------------------------------
     wire [   ADC_NUM*CHANNEL_NUM-1:0] ringbuffer_trig;
-    // reg  [   ADC_NUM*CHANNEL_NUM-1:0] ringbuffer_trig_d;
-    // wire [   ADC_NUM*CHANNEL_NUM-1:0] ringbuffer_trig_rise;
     wire [ADC_NUM*CHANNEL_NUM*16-1:0] ringbuffer_out;
     wire [   ADC_NUM*CHANNEL_NUM-1:0] ringbuffer_data_valid;
-
-    // always @(posedge adc_fco) begin
-    //     ringbuffer_trig_d <= ringbuffer_trig;
-    // end
-
-    // assign ringbuffer_trig_rise = ringbuffer_trig & ~ringbuffer_trig_d;
-
-    reg  [                      47:0] time_cnt;
-    always @(posedge adc_fco) begin
-        if (~(si5345_lolb && (&ad9253_config_done) && rst_n)) begin
-            time_cnt <= 48'd0;
-        end else begin
-            time_cnt <= time_cnt + 1'b1;
-        end
-    end
 
     genvar rb_idx;
     generate
         for (rb_idx = 0; rb_idx < ADC_NUM * CHANNEL_NUM; rb_idx = rb_idx + 1) begin : ringbuffer_gen
 
-            // assign ringbuffer_trig[rb_idx] = tdc_raw_rise[11*rb_idx+10] && !fifo_sync_prog_full[rb_idx];
-            wire trig_src;
-            assign trig_src =
-            tdc_trig_flag ?
-            tdc_raw_rise[11*rb_idx+10] :
-            (ad9253_data_chx[rb_idx*16+15 -: 14] < 14'd7100);
-
-            assign ringbuffer_trig[rb_idx] = trig_src && !fifo_sync_prog_full[rb_idx];
+            assign ringbuffer_trig[rb_idx] = tdc_raw_rise[11*rb_idx+10] && !fifo_sync_prog_full[rb_idx];
 
             ringbuffer #(
                 .DATA_WIDTH (16),
@@ -462,7 +388,7 @@ module main_32ch (
                 .rst_n     (si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n),
                 .din       (ad9253_data_chx[rb_idx*16+:16]),
                 .tdc_data  (tdc_raw_rise[rb_idx*11+:10]),
-                .time_cnt  (time_cnt),
+                .time_cnt  (ptp_timestamp_rx[47:0]),
                 .trig      (ringbuffer_trig[rb_idx]),
                 .dout      (ringbuffer_out[rb_idx*16+:16]),
                 .data_valid(ringbuffer_data_valid[rb_idx])
@@ -530,120 +456,39 @@ module main_32ch (
         .current_ch(current_ch)  // output reg [4:0] current_ch
     );
 
+    // --------------------------------
+    // fifo_async_gt
+    // --------------------------------
+    wire        fifo_async_rd_en;
+    wire [15:0] fifo_async_data_out;
+    wire        fifo_async_full;
+    wire        fifo_async_empty;
+    wire        fifo_async_prog_full;
+    wire        fifo_async_prog_empty;
 
+    fifo_async_gt inst_fifo_async_gt (
+        .rst(~(si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n)),
+        .wr_clk(adc_fco),
+        .rd_clk(clk_txoutclk_bufg),
+        .din(arbiter_out),
+        .wr_en(fifo_async_wr_en),
+        .rd_en(fifo_async_rd_en),
+        .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN) / 4),
+        .prog_full_thresh(11'd2047 - (TRIG_TOTAL + HEAD_LEN)),
+        .dout(fifo_async_data_out),
+        .full(fifo_async_full),
+        .empty(fifo_async_empty),
+        .prog_full(fifo_async_prog_full),
+        .prog_empty(fifo_async_prog_empty),
+        .wr_rst_busy(),
+        .rd_rst_busy()
+    );
 
-    // // --------------------------------
-    // // fifo_async_aurora
-    // // --------------------------------
-    // wire        fifo_async_rd_en;
-    // wire [63:0] fifo_async_data_out;
-    // wire        fifo_async_full;
-    // wire        fifo_async_empty;
-    // wire        fifo_async_prog_full;
-    // wire        fifo_async_prog_empty;
-    // wire        fifo_async_valid;
+    assign fifo_async_rd_en = !fifo_async_empty && !slow_control_active;
 
-    // fifo_async_aurora inst_fifo_async_aurora (
-    //     .rst(~(si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n)),  // input wire rst
-    //     .wr_clk(adc_fco),  // input wire wr_clk
-    //     .rd_clk(aurora_usr_clk),  // input wire rd_clk
-    //     .din(arbiter_out),  // input wire [15 : 0] din
-    //     .wr_en(fifo_async_wr_en),  // input wire wr_en
-    //     .rd_en(fifo_async_rd_en),  // input wire rd_en
-    //     .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN) / 4),  // input wire [8 : 0] prog_empty_thresh
-    //     .prog_full_thresh(11'd2047 - (TRIG_TOTAL + HEAD_LEN)),    // input wire [10 : 0] prog_full_thresh
-    //     .dout(fifo_async_data_out),  // output wire [63 : 0] dout
-    //     .full(fifo_async_full),  // output wire full
-    //     .empty(fifo_async_empty),  // output wire empty
-    //     .prog_full(fifo_async_prog_full),  // output wire prog_full
-    //     .prog_empty(fifo_async_prog_empty),  // output wire prog_empty
-    //     .wr_rst_busy(),  // output wire wr_rst_busy
-    //     .rd_rst_busy(),  // output wire rd_rst_busy
-    //     .valid(fifo_async_valid)
-    // );
-
-    // assign fifo_async_rd_en = !fifo_async_empty && s_axi_tx_tready;
-    // assign s_axi_tx_tvalid  = fifo_async_valid;
-
-    // //--------------------------------
-    // // Aurora
-    // //--------------------------------
-    // wire        aurora_channel_up;
-    // wire        aurora_lane_up;
-    // wire        aurora_hard_err;
-    // wire        aurora_soft_err;
-    // wire        gt_pll_lock;
-
-    // wire [63:0] s_axi_tx_tdata;
-    // wire        s_axi_tx_tvalid;
-    // wire        s_axi_tx_tready;
-    // wire [63:0] m_axi_rx_tdata;
-    // wire        m_axi_rx_tvalid;
-
-    // wire        aurora_usr_clk;
-    // wire        aurora_reset_out;
-    // aurora_64b66b_0 inst_aurora_64b66b_0 (
-    //     .rxp(SFP1_rx_p),  // input wire [0 : 0] rxp
-    //     .rxn(SFP1_rx_n),  // input wire [0 : 0] rxn
-    //     .gt_refclk1_p(clk_125M_p),  // input wire gt_refclk1_p
-    //     .gt_refclk1_n(clk_125M_n),  // input wire gt_refclk1_n
-    //     .reset_pb(~rst_n),  // input wire reset_pb
-    //     .power_down(1'b0),  // input wire power_down
-    //     .pma_init(1'b0),  // input wire pma_init
-    //     .loopback               (3'b000),                 // input wire [2 : 0] loopback, 000 normal，010 near-end PCS, 100, PMA loopback
-    //     .txp(SFP1_tx_p),  // output wire [0 : 0] txp
-    //     .txn(SFP1_tx_n),  // output wire [0 : 0] txn
-    //     .hard_err(aurora_hard_err),  // output wire hard_err
-    //     .soft_err(aurora_soft_err),  // output wire soft_err
-    //     .channel_up(aurora_channel_up),  // output wire channel_up
-    //     .lane_up(aurora_lane_up),  // output wire [0 : 0] lane_up
-    //     .tx_out_clk(),  // output wire tx_out_clk
-    //     .drp_clk_in(clk_200M),  // input wire drp_clk_in
-    //     .gt_pll_lock(gt_pll_lock),  // output wire gt_pll_lock
-    //     .s_axi_tx_tdata(fifo_async_data_out),  // input wire [0 : 63] s_axi_tx_tdata
-    //     .s_axi_tx_tvalid(s_axi_tx_tvalid),  // input wire s_axi_tx_tvalid
-    //     .s_axi_tx_tready(s_axi_tx_tready),  // output wire s_axi_tx_tready
-    //     .m_axi_rx_tdata(m_axi_rx_tdata),  // output wire [0 : 63] m_axi_rx_tdata
-    //     .m_axi_rx_tvalid(m_axi_rx_tvalid),  // output wire m_axi_rx_tvalid
-    //     .mmcm_not_locked_out(),  // output wire mmcm_not_locked_out
-    //     .drpaddr_in(0),  // input wire [8 : 0] drpaddr_in
-    //     .drpdi_in(0),  // input wire [15 : 0] drpdi_in
-    //     .qpll_drpaddr_in(0),  // input wire [7 : 0] qpll_drpaddr_in
-    //     .qpll_drpdi_in(0),  // input wire [15 : 0] qpll_drpdi_in
-    //     .drprdy_out(),  // output wire drprdy_out
-    //     .drpen_in(0),  // input wire drpen_in
-    //     .drpwe_in(0),  // input wire drpwe_in
-    //     .qpll_drprdy_out(0),  // output wire qpll_drprdy_out
-    //     .qpll_drpen_in(0),  // input wire qpll_drpen_in
-    //     .qpll_drpwe_in(0),  // input wire qpll_drpwe_in
-    //     .drpdo_out(),  // output wire [15 : 0] drpdo_out
-    //     .qpll_drpdo_out(),  // output wire [15 : 0] qpll_drpdo_out
-    //     .init_clk(clk_200M),  // input wire init_clk
-    //     .link_reset_out(link_reset_out),  // output wire link_reset_out
-    //     .user_clk_out(aurora_usr_clk),  // output wire user_clk_out
-    //     .sync_clk_out(),  // output wire sync_clk_out
-    //     .gt_qpllclk_quad3_out(),  // output wire gt_qpllclk_quad3_out
-    //     .gt_qpllrefclk_quad3_out(),  // output wire gt_qpllrefclk_quad3_out
-    //     .gt_qpllrefclklost_out(),  // output wire gt_qpllrefclklost_out
-    //     .gt_qplllock_out(),  // output wire gt_qplllock_out
-    //     .gt_rxcdrovrden_in(1'b0),  // input wire gt_rxcdrovrden_in
-    //     .sys_reset_out(aurora_reset_out),  // output wire sys_reset_out
-    //     .gt_reset_out()  // output wire gt_reset_out
-    // );
-
-    // ila_aurora ila_aurora_inst (
-    //     .clk   (aurora_usr_clk),
-    //     .probe0(aurora_channel_up),
-    //     .probe1(fifo_async_data_out),
-    //     .probe2(s_axi_tx_tvalid),
-    //     .probe3(s_axi_tx_tready),
-    //     .probe4(m_axi_rx_tdata),
-    //     .probe5(m_axi_rx_tvalid)
-    // );
-
-    // //--------------------------------
-    // // gtx_interface
-    // //--------------------------------
+    // --------------------------------
+    // gtx_interface
+    // --------------------------------
     wire rx_pma_rst_n;
     wire rx_reset_done;
 
@@ -695,26 +540,26 @@ module main_32ch (
     //--------------------------------
     // clk sync
     //--------------------------------
-    wire start_ptp;
-    wire [7:0] uart_ptp_data;
-
     wire [63:0] ptp_timestamp_tx;
     wire [63:0] ptp_timestamp_rx;
-    wire [15:0] timestamp_rx_delay;
-    wire timestamp_rx_delay_valid;
-
-    reg  uart_ptp_read_enable;
-    wire uart_ptp_read_empty;
-    wire uart_ptp_read_valid;
 
     wire [3:0] ptp_flags;
     wire gt_link_up;
+    wire ptp_working;
 
-    // gt user data
-    wire [15:0] user_tx_data;
-    wire user_tx_data_valid;
+    //--------------------------------
+    // slow control user data (via GT)
+    //--------------------------------
     wire [15:0] user_rx_data;
-    wire user_rx_data_valid;
+    wire        user_rx_data_valid;
+    wire [15:0] user_tx_data_mux;
+    wire        user_tx_data_valid_mux;
+    wire        slow_control_active;
+    wire [ 7:0] brd_num;
+
+    // FIFO 读侧（txoutclk 域，slow_control_manager 内部完成读逻辑）
+    wire [15:0] sc_fifo_dout;
+    wire        sc_fifo_valid;
 
     time_sync_manager instance_time_sync_manager (
         .clk_txoutclk_bufg  (clk_txoutclk_bufg),
@@ -730,26 +575,26 @@ module main_32ch (
         .gt_rx_data_valid   (gt_rx_data_valid),
         .gt_rx_data_is_comma(rx_data_is_comma),
 
-        // user data
-        .user_tx_data       (user_tx_data),
-        .user_tx_data_valid (user_tx_data_valid),
+        // user data (GT slow control)
+        .user_tx_data       (user_tx_data_mux),
+        .user_tx_data_valid (user_tx_data_valid_mux),
         .user_rx_data       (user_rx_data),
         .user_rx_data_valid (user_rx_data_valid),
 
         // timestamp
         .timestamp_tx       (ptp_timestamp_tx),
         .timestamp_rx       (ptp_timestamp_rx),     // slave only uses this
-        .ptp_start          (start_ptp),            // rising edge trigger
-        .ptp_value          (timestamp_rx_delay),   // delay value calculated by software
-        .ptp_value_valid    (timestamp_rx_delay_valid),
+        .ptp_start          (1'b0),                 // slave: no local start
+        .ptp_value          (16'b0),
+        .ptp_value_valid    (1'b0),
         .tx_load_value      (64'b0),
         .tx_load            (0),
         
-        // uart interface, only master used
-        .uart_data_out      (uart_ptp_data),
-        .uart_read_enable   (uart_ptp_read_enable),
-        .uart_read_empty    (uart_ptp_read_empty),
-        .uart_read_valid    (uart_ptp_read_valid),
+        // uart interface (master only, slave unused)
+        .uart_data_out      (),
+        .uart_read_enable   (1'b0),
+        .uart_read_empty    (),
+        .uart_read_valid    (),
 
         // data alignment and pma reset
         .gt_rx_error        (gtx_rx_error),
@@ -758,115 +603,106 @@ module main_32ch (
         .gt_link_up         (gt_link_up),
 
         // flags
-        .flags              (ptp_flags)
+        .flags              (ptp_flags),
+
+        // ptp working flag
+        .ptp_working        (ptp_working)
     );
 
+    //--------------------------------
+    // working flags
+    //--------------------------------
+    // ptp_working_flag: 1 while PTP exchange is active, else 0
+    wire ptp_working_flag;
+    assign ptp_working_flag = ptp_working;
+
+    // slow_control_flag: 1 while slow control is being transferred, else 0
+    wire slow_control_flag;
+    assign slow_control_flag = slow_control_active;
+
+    // GT 发送数据选择：慢控优先，否则发事件数据
+    assign user_tx_data_mux       = slow_control_active ? sc_fifo_dout : fifo_async_data_out;
+    assign user_tx_data_valid_mux = slow_control_active ? sc_fifo_valid : !fifo_async_empty;
 
     //--------------------------------
-    // uart
+    // slow control (via GT, replaces uart slow control)
     //--------------------------------
-    reg ad9253_fco_buf_sync1, ad9253_fco_buf_sync2;
-    always @(posedge clk_200M or negedge rst_n) begin
+    // adc_fco 现为 clk_rxoutclk_bufg，与 slow_control_manager 同域。
+    // AD9253_BIT_SLIP 用 fco_rise 计数等待对齐，改用 rxoutclk 域的周期脉冲。
+    reg [ 7:0] ad9253_fco_cnt_rx;
+    always @(posedge adc_fco or negedge rst_n) begin
         if (!rst_n) begin
-            ad9253_fco_buf_sync1 <= 0;
-            ad9253_fco_buf_sync2 <= 0;
+            ad9253_fco_cnt_rx <= 0;
         end else begin
-            ad9253_fco_buf_sync1 <= adc_fco;
-            ad9253_fco_buf_sync2 <= ad9253_fco_buf_sync1;
+            ad9253_fco_cnt_rx <= ad9253_fco_cnt_rx + 1'b1;
         end
     end
     wire ad9253_fco_rise;
-    assign ad9253_fco_rise = ad9253_fco_buf_sync1 & ~ad9253_fco_buf_sync2;  // 检测上升沿
+    assign ad9253_fco_rise = (ad9253_fco_cnt_rx == 8'd0);
 
     wire [ADC_NUM-1:0] ad9253_config_done;
-    uart_controller_32ch #(
+    slow_control_manager #(
         .ADC_NUM(ADC_NUM),
         .CHANNEL_NUM(CHANNEL_NUM)
-    ) u_uart_controller_32ch (
-        .clk  (clk_200M),  // input wire clk
-        .rst_n(rst_n),     // input wire rst_n
+    ) u_slow_control_manager (
+        .clk  (clk_rxoutclk_bufg),
+        .clk_tx (clk_txoutclk_bufg),
+        .rst_n(rst_n),
 
-        // UART接口
-        .uart_rx(uart_rx),  // input wire uart_rx
-        .uart_tx(uart_tx),  // output wire uart_tx
+        // GT 慢控收发接口
+        .user_rx_data       (user_rx_data),
+        .user_rx_data_valid (user_rx_data_valid),
+
+        // FIFO 读侧（txoutclk 域）
+        .sc_fifo_dout  (sc_fifo_dout),
+        .sc_fifo_valid (sc_fifo_valid),
+
+        // 标志
+        .slow_control_active   (slow_control_active),
+        .brd_num               (brd_num),
 
         // Si5345接口
         .si5345_spi_busy (si5345_spi_busy),   // input wire si5345_spi_busy
         .si5345_bit_cnt  (si5345_bit_cnt),    // input wire [3:0] si5345_bit_cnt
         .si5345_spi_done (si5345_spi_done),   // input wire si5345_spi_done
-        .si5345_rw       (si5345_rw),         // output reg si5345_rw
-        .si5345_data_in  (si5345_data_in),    // output reg [15:0] si5345_data_in
-        .si5345_spi_start(si5345_spi_start),  // output reg si5345_spi_start
-        .si5345_cs_n     (si5345_cs_n),       // output reg si5345_cs_n
+        .si5345_rw       (si5345_rw),         // output si5345_rw
+        .si5345_data_in  (si5345_data_in),    // output [15:0] si5345_data_in
+        .si5345_spi_start(si5345_spi_start),  // output si5345_spi_start
+        .si5345_cs_n     (si5345_cs_n),       // output si5345_cs_n
         .si5345_data_out (si5345_data_out),   // input wire [15:0] si5345_data_out
 
         // AD9253接口
         .ad9253_spi_done   (ad9253_spi_done),    // input wire ad9253_spi_done
         .ad9253_spi_busy   (ad9253_spi_busy),    // input wire ad9253_spi_busy
-        .ad9253_rw         (ad9253_rw),          // output reg ad9253_rw
-        .ad9253_data_in    (ad9253_data_in),     // output reg [7:0] ad9253_data_in
-        .ad9253_spi_start  (ad9253_spi_start),   // output reg ad9253_spi_start
-        .ad9253_cs_n       (ad9253_cs_n),        // output reg ad9253_cs_n
+        .ad9253_rw         (ad9253_rw),          // output ad9253_rw
+        .ad9253_data_in    (ad9253_data_in),     // output [7:0] ad9253_data_in
+        .ad9253_spi_start  (ad9253_spi_start),   // output ad9253_spi_start
+        .ad9253_cs_n       (ad9253_cs_n),        // output [7:0] ad9253_cs_n
         .ad9253_data_out   (ad9253_data_out),    // input wire [7:0] ad9253_data_out
-        .ad9253_config_done(ad9253_config_done), // output reg ad9253_config_done
+        .ad9253_config_done(ad9253_config_done), // output [7:0] ad9253_config_done
 
         // DAC128S085接口
         .dac128s085_spi_done (dac128s085_spi_done),   // input wire dac128s085_spi_done
         .dac128s085_spi_busy (dac128s085_spi_busy),   // input wire dac128s085_spi_busy
-        .dac128s085_data_in  (dac128s085_data_in),    // output reg [15:0] dac128s085_data_in
-        .dac128s085_spi_start(dac128s085_spi_start),  // output reg dac128s085_spi_start
-        .dac128s085_cs_n     (dac128s085_cs_n),       // output reg dac128s085_cs_n
+        .dac128s085_data_in  (dac128s085_data_in),    // output [511:0] dac128s085_data_in
+        .dac128s085_spi_start(dac128s085_spi_start),  // output dac128s085_spi_start
+        .dac128s085_cs_n     (dac128s085_cs_n),       // output dac128s085_cs_n
 
         // Bit slip控制
         .ad9253_fco_rise(ad9253_fco_rise),  // input wire ad9253_fco_rise
-        .ad9253_data_chx(ad9253_data_chx),  // input wire [7:0] ad9253_d0_chx [3:0]
-        .bitslip_chx    (bitslip_chx),      // output wire bitslip0
+        .ad9253_data_chx(ad9253_data_chx),  // input wire [511:0] ad9253_data_chx
+        .bitslip_chx    (bitslip_chx),      // output bitslip_chx
 
         // idelay
         .idelay_tap(idelay_tap),
         .idelay_ld (idelay_ld),
 
         // tdc
-        .tdc_cali_in(fifo_tdc_dout),
-        .tdc_cali_en(fifo_tdc_valid),
+        .tdc_cali_in(tdc_cali_in),
+        .tdc_cali_en(tdc_cali_en),
         .cali_flag  (cali_flag)
     );
 
     wire fifo_sync_prog_full_any;
     assign fifo_sync_prog_full_any = |fifo_sync_prog_full;
-
-    ila_adc ila_adc_inst (
-        .clk    (adc_fco),
-        .probe0 (max40026_ch),
-        .probe1 (ad9253_data_chx[79:64]),
-        .probe2 (ringbuffer_trig[4]),
-        .probe3 (ringbuffer_data_valid[4]),
-        .probe4 (fifo_sync_empty[4]),
-        .probe5 (fifo_sync_prog_empty[4]),
-        .probe6 (fifo_sync_prog_full_any),
-        .probe7 (fifo_sync_dout[79:64]),
-        .probe8 (fifo_sync_valid[4]),
-        .probe9 (fifo_sync_rd_en[4]),
-        .probe10(arbiter_out),
-        .probe11(fifo_async_wr_en),
-        .probe12(fifo_async_full),
-        .probe13(fifo_async_empty),
-        .probe14(fifo_async_prog_full),
-        .probe15(fifo_async_prog_empty),
-        .probe16(fifo_async_data_out),
-        .probe17(fifo_async_rd_en),
-        .probe18(current_ch),
-        .probe19(fifo_tdc_wr_en[4]),
-        .probe20(fifo_tdc_full[4]),
-        .probe21(fifo_tdc_empty[4]),
-        .probe22(fifo_tdc_rd_en[4]),
-        .probe23(fifo_tdc_valid[4]),
-        .probe24(ringbuffer_out[79:64])
-    );
-    // .probe18(s_axi_tx_tvalid),
-    // .probe19(0),
-    // .probe20(s_axi_tx_tready),
-    // .probe21(aurora_channel_up),
-    // .probe22(aurora_lane_up),
-    // .probe23(m_axi_rx_tvalid)
 endmodule

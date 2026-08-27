@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 module ad9253_selectio_top (
-    input clk,
+    input spi_clk,
+    input selectio_ref_clk,
     input rst_n,
     input spi_rst_n,
 
@@ -29,7 +30,7 @@ module ad9253_selectio_top (
     output [511:0] ad9253_data_chx,
 
     // output [3:0] ad9253_clk_div_out,
-    output adc_fco,
+    input adc_fco,
 
     // 每个通道的bitslip控制信号
     input [63:0] bitslip_chx,
@@ -77,7 +78,7 @@ module ad9253_selectio_top (
     spi_3wire_master_8bit #(
         .CLK_DIV(100)
     ) ad9253_spi_inst (
-        .clk      (clk),
+        .clk      (spi_clk),
         .rst_n    (spi_rst_n),
         .start    (ad9253_spi_start),
         .rw       (ad9253_rw),
@@ -114,7 +115,7 @@ module ad9253_selectio_top (
         .in_delay_tap_out(),  // output [79:0] in_delay_tap_out          
 
         .delay_locked(delay_locked[0]),  // output delay_locked                      
-        .ref_clock(clk),  // input ref_clock                         
+        .ref_clock(selectio_ref_clk),  // input ref_clock  (IDELAYCTRL ref, 200M)
         .bitslip({
             bitslip_chx_pulse[23:16], bitslip_chx_pulse[7:0]
         }),  // input bitslip                           
@@ -142,7 +143,7 @@ module ad9253_selectio_top (
         .in_delay_tap_out(),  // output [79:0] in_delay_tap_out          
 
         .delay_locked(delay_locked[1]),  // output delay_locked                      
-        .ref_clock(clk),  // input ref_clock                         
+        .ref_clock(selectio_ref_clk),  // input ref_clock  (IDELAYCTRL ref, 200M)
         .bitslip({
             bitslip_chx_pulse[31:24], bitslip_chx_pulse[15:8]
         }),  // input bitslip                           
@@ -170,7 +171,7 @@ module ad9253_selectio_top (
         .in_delay_tap_out(),  // output [79:0] in_delay_tap_out          
 
         .delay_locked(delay_locked[2]),  // output delay_locked                      
-        .ref_clock(clk),  // input ref_clock                         
+        .ref_clock(selectio_ref_clk),  // input ref_clock  (IDELAYCTRL ref, 200M)
         .bitslip({
             bitslip_chx_pulse[55:48], bitslip_chx_pulse[39:32]
         }),  // input bitslip                           
@@ -198,7 +199,7 @@ module ad9253_selectio_top (
         .in_delay_tap_out(),  // output [79:0] in_delay_tap_out          
 
         .delay_locked(delay_locked[3]),  // output delay_locked                      
-        .ref_clock(clk),  // input ref_clock                         
+        .ref_clock(selectio_ref_clk),  // input ref_clock  (IDELAYCTRL ref, 200M)
         .bitslip({
             bitslip_chx_pulse[63:56], bitslip_chx_pulse[47:40]
         }),  // input bitslip                           
@@ -207,11 +208,6 @@ module ad9253_selectio_top (
         .clk_div_out(ad9253_clk_div_out[3]),  // output clk_div_out                       
         .clk_reset(~rst_n),  // input clk_reset
         .io_reset(~rst_n)  // input io_reset
-    );
-
-    BUFG bufg_dac128s085 (
-        .I(ad9253_clk_div_out[0]),
-        .O(adc_fco)
     );
 
     wire [  7:0] async_fifo_full;

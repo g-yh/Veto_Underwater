@@ -187,8 +187,6 @@ module slow_control_manager #(
 
     reg        tdc_cali_done;
     reg [ 9:0] tdc_bin;
-    reg [ 7:0] tdc_bin_lo;   // 保留 TDC 低 8 位用于第二步发送
-    reg [ 1:0] send_step;
     reg [ 4:0] tdc_num;
 
     // 状态寄存器
@@ -415,8 +413,6 @@ module slow_control_manager #(
             tdc_cali_done <= 0;
             cali_flag <= 0;
             tdc_bin <= 0;
-            tdc_bin_lo <= 0;
-            send_step <= 0;
             tdc_num <= 0;
 
             // 发送
@@ -474,7 +470,6 @@ module slow_control_manager #(
                     tdc_cali_done <= 0;
                     cali_flag <= 0;
                     tdc_bin <= 0;
-                    send_step <= 0;
                     tdc_num <= 0;
 
                     // 发送
@@ -562,9 +557,8 @@ module slow_control_manager #(
                 end
 
                 SEND_SI5345_DATA: begin
-                    // 发一个 16bit 字 {brd_num, si5345 读回数据}
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {brd_num, si5345_data_out[7:0]};
+                        slow_control_data       <= {8'b0, si5345_data_out[7:0]};
                         slow_control_data_valid <= 1'b1;
                         send_phase              <= 1'b1;
                     end else begin
@@ -743,7 +737,7 @@ module slow_control_manager #(
 
                 SEND_AD9253_DATA: begin
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {brd_num, ad9253_data_out[7:0]};
+                        slow_control_data       <= {8'b0, ad9253_data_out[7:0]};
                         slow_control_data_valid <= 1'b1;
                         send_phase              <= 1'b1;
                     end else begin
@@ -767,7 +761,7 @@ module slow_control_manager #(
 
                 SEND_TEST_DATA: begin
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {brd_num, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
+                        slow_control_data       <= {8'b0, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
                         slow_control_data_valid <= 1'b1;
                         send_phase              <= 1'b1;
                     end else begin
@@ -843,46 +837,22 @@ module slow_control_manager #(
                 TDC_CALI: begin
                     cali_flag[tdc_num] <= 1;
                     if (tdc_cali_en[tdc_num]) begin
-                        tdc_bin    <= tdc_cali_in[10*tdc_num+:10];
-                        tdc_bin_lo <= tdc_cali_in[10*tdc_num+:8];
+                        tdc_bin <= tdc_cali_in[10*tdc_num+:10];
                     end
                 end
 
                 TDC_CALI_SEND_DATA: begin
-                    slow_control_data_valid <= 1'b0;
-
-                    case (send_step)
-                        2'd0: begin
-                            if (!tdc_cali_done) begin
-                                slow_control_data       <= {brd_num, 6'b0, tdc_bin[9:8]};
-                                slow_control_data_valid <= 1'b1;
-                                send_step               <= 2'd1;
-                            end
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {6'b0, tdc_bin};
+                        slow_control_data_valid <= 1'b1;
+                        send_phase              <= 1'b1;
+                    end else begin
+                        slow_control_data_valid <= 1'b0;
+                        if (!slow_control_data_valid) begin
+                            tdc_cali_done <= 1'b1;
+                            send_phase    <= 1'b0;
                         end
-
-                        2'd1: begin
-                            if (!slow_control_data_valid) begin
-                                send_step <= 2'd2;
-                            end
-                        end
-
-                        2'd2: begin
-                            if (!slow_control_data_valid) begin
-                                slow_control_data       <= {brd_num, tdc_bin_lo};
-                                slow_control_data_valid <= 1'b1;
-                            end
-                            if (slow_control_data_valid) begin
-                                send_step <= 2'd3;
-                            end
-                        end
-
-                        2'd3: begin
-                            if (!slow_control_data_valid) begin
-                                tdc_cali_done <= 1'b1;
-                                send_step     <= 2'd0;
-                            end
-                        end
-                    endcase
+                    end
                 end
 
             endcase

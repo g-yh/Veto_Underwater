@@ -421,7 +421,7 @@ module main_32ch (
                 .wr_en(fifo_sync_wr_en[fs_idx]),  // input wire wr_en
                 .rd_en(fifo_sync_rd_en[fs_idx]),  // input wire rd_en
                 .prog_empty_thresh(TRIG_TOTAL + HEAD_LEN),  // input wire [10 : 0] prog_empty_thresh
-                .prog_full_thresh(11'd2047 - (TRIG_TOTAL + HEAD_LEN)),  // input wire [10 : 0] prog_full_thresh
+                .prog_full_thresh(11'd2048 - (TRIG_TOTAL + HEAD_LEN)),  // input wire [10 : 0] prog_full_thresh
                 .dout(fifo_sync_dout[fs_idx*16+:16]),  // output wire [15 : 0] dout
                 .full(fifo_sync_full[fs_idx]),  // output wire full
                 .empty(fifo_sync_empty[fs_idx]),  // output wire empty
@@ -459,7 +459,7 @@ module main_32ch (
     // --------------------------------
     // fifo_async_gt
     // --------------------------------
-    wire        fifo_async_rd_en;
+    reg         fifo_async_rd_en;
     wire [15:0] fifo_async_data_out;
     wire        fifo_async_full;
     wire        fifo_async_empty;
@@ -473,8 +473,8 @@ module main_32ch (
         .din(arbiter_out),
         .wr_en(fifo_async_wr_en),
         .rd_en(fifo_async_rd_en),
-        .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN) / 4),
-        .prog_full_thresh(11'd2047 - (TRIG_TOTAL + HEAD_LEN)),
+        .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN)),
+        .prog_full_thresh(11'd2048 - (TRIG_TOTAL + HEAD_LEN)),
         .dout(fifo_async_data_out),
         .full(fifo_async_full),
         .empty(fifo_async_empty),
@@ -484,7 +484,7 @@ module main_32ch (
         .rd_rst_busy()
     );
 
-    assign fifo_async_rd_en = !fifo_async_empty && !slow_control_active;
+
 
     // --------------------------------
     // gtx_interface
@@ -620,9 +620,82 @@ module main_32ch (
     wire slow_control_flag;
     assign slow_control_flag = slow_control_active;
 
-    // GT 发送数据选择：慢控优先，否则发事件数据
-    assign user_tx_data_mux       = slow_control_active ? sc_fifo_dout : fifo_async_data_out;
-    assign user_tx_data_valid_mux = slow_control_active ? sc_fifo_valid : !fifo_async_empty;
+    //--------------------------------
+    // GT 发送帧头状态机：区分 慢控回复 与 ADC 事件数据
+    //   慢控回复: 16'hFFF1 + 1 个 word
+    //   ADC 事件: 16'hFFF0 + TRIG_TOTAL+HEAD_LEN 个 word
+    //   空闲:      16'hBC3C
+    //--------------------------------
+    localparam TX_FRM_IDLE = 2'd0;
+    localparam TX_FRM_SC   = 2'd1;
+    localparam TX_FRM_EVT  = 2'd2;
+
+    reg [1:0] tx_frm_state;
+    reg [5:0] tx_evt_cnt;
+
+    // 事件数据长度（word）
+    localparam EVT_WORDS = TRIG_TOTAL + HEAD_LEN;
+
+    assign user_tx_data_mux       = tx_frm_data;
+    assign user_tx_data_valid_mux = tx_frm_valid;
+
+    reg [15:0] tx_frm_data;
+    reg        tx_frm_valid;
+
+    always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
+        if (!rst_n) begin
+            tx_frm_state   <= TX_FRM_IDLE;
+            tx_frm_data    <= 16'hBC3C;
+            tx_frm_valid   <= 1'b0;
+            tx_evt_cnt     <= 6'd0;
+            fifo_async_rd_en <= 1'b0;
+        end else begin
+            case (tx_frm_state)
+                // 空闲：慢控优先，其次事件
+                TX_FRM_IDLE: begin
+                    tx_frm_data  <= 16'hBC3C;
+                    tx_frm_valid <= 1'b0;
+                    fifo_async_rd_en <= 1'b0;
+                    if (sc_fifo_valid) begin
+                        // 慢控回复帧头
+                        tx_frm_state <= TX_FRM_SC;
+                        tx_frm_data  <= 16'hFFF1;
+                        tx_frm_valid <= 1'b1;
+                    end else if (~fifo_async_prog_empty) begin
+                        // 至少一个完整事件已缓冲
+                        tx_frm_state <= TX_FRM_EVT;
+                        tx_frm_data  <= 16'hFFF0;
+                        tx_frm_valid <= 1'b1;
+                        tx_evt_cnt   <= 6'd0;
+                    end
+                end
+                // 慢控回复：转发 sc_fifo_dout，直到空
+                TX_FRM_SC: begin
+                    tx_frm_data  <= sc_fifo_dout;
+                    tx_frm_valid <= sc_fifo_valid;
+                    fifo_async_rd_en <= 1'b0;
+                    if (~sc_fifo_valid) begin
+                        tx_frm_state <= TX_FRM_IDLE;
+                    end
+                end
+                // ADC 事件：转发 fifo_async_data_out，共 EVT_WORDS 个
+                TX_FRM_EVT: begin
+                    tx_frm_data      <= fifo_async_data_out;
+                    tx_frm_valid     <= 1'b1;
+                    fifo_async_rd_en <= 1'b1;
+                    if (tx_evt_cnt == EVT_WORDS[5:0] - 6'd1) begin
+                        tx_frm_state <= TX_FRM_IDLE;
+                        tx_evt_cnt   <= 6'd0;
+                    end else begin
+                        tx_evt_cnt <= tx_evt_cnt + 6'd1;
+                    end
+                end
+                default: begin
+                    tx_frm_state <= TX_FRM_IDLE;
+                end
+            endcase
+        end
+    end
 
     //--------------------------------
     // slow control (via GT, replaces uart slow control)

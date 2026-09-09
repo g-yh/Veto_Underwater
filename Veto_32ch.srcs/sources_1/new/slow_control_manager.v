@@ -19,9 +19,11 @@ module slow_control_manager #(
     input  wire [15:0] user_rx_data,
     input  wire        user_rx_data_valid,
 
-    // FIFO 读侧输出（txoutclk 域，供 main 接 GT user_tx_data）
+    // FIFO 读侧（txoutclk 域，供 main 接 GT user_tx_data）
+    //   握手：main 通过 sc_fifo_empty 判断是否有数据，用 sc_fifo_rd_en 逐字弹出
     output wire [15:0] sc_fifo_dout,
-    output wire        sc_fifo_valid,
+    input  wire        sc_fifo_rd_en,     // main 控制读（txoutclk 域）
+    output wire        sc_fifo_empty,    // FIFO 真实空标志（txoutclk 域）
 
     // 标志
     output wire        slow_control_active,   // 慢控传输进行中（state != IDLE）
@@ -869,8 +871,6 @@ module slow_control_manager #(
     reg [15:0] slow_control_data;
     reg        slow_control_data_valid;
     wire       sc_fifo_full;
-    wire       sc_fifo_empty;
-    wire       sc_fifo_rd_en;
 
     fifo_slow_control u_fifo_slow_control (
         .rst        (~rst_n),
@@ -885,15 +885,4 @@ module slow_control_manager #(
         .wr_rst_busy(),
         .rd_rst_busy()
     );
-
-    // 标准模式：dout 在 rd_en 后一拍才呈现，valid 延迟一拍对齐
-    assign sc_fifo_rd_en = ~sc_fifo_empty;
-    reg sc_fifo_valid_r;
-    always @(posedge clk_tx or negedge rst_n) begin
-        if (!rst_n)
-            sc_fifo_valid_r <= 1'b0;
-        else
-            sc_fifo_valid_r <= ~sc_fifo_empty;
-    end
-    assign sc_fifo_valid = sc_fifo_valid_r;
 endmodule

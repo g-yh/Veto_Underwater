@@ -5,9 +5,6 @@ module main_32ch (
     input clk_200M_p,
     input clk_200M_n,
 
-    input  wire uart_rx,  // UART接收数据
-    output wire uart_tx,  // UART发送数据
-
     //--------------------------------
     // Si5345
     //--------------------------------
@@ -85,7 +82,7 @@ module main_32ch (
     output wire SFP_tx_disable1,  // set low
     output wire SFP_tx_disable2,  // set low
 
-    output wire gt_link_up_out    // GT link established
+    output wire gt_link_up_out_led    // GT link established
 );
 
     localparam ADC_NUM = 4'd8;
@@ -97,7 +94,7 @@ module main_32ch (
     assign clk_125M_en = 1;
     assign SFP_tx_disable1 = 0;
     assign SFP_tx_disable2 = 0;
-    assign gt_link_up_out = gt_link_up;
+    assign gt_link_up_out_led = gt_link_up;
     // UART 慢控已改为 GT 慢控，uart 端口不再使用
     assign uart_tx = 1'b1;
 
@@ -557,9 +554,10 @@ module main_32ch (
     wire        slow_control_active;
     wire [ 7:0] brd_num;
 
-    // FIFO 读侧（txoutclk 域，slow_control_manager 内部完成读逻辑）
+    // FIFO 读侧（txoutclk 域，main 控制读）
     wire [15:0] sc_fifo_dout;
-    wire        sc_fifo_valid;
+    wire        sc_fifo_empty;
+    reg         sc_fifo_rd_en;
 
     time_sync_manager instance_time_sync_manager (
         .clk_txoutclk_bufg  (clk_txoutclk_bufg),
@@ -649,6 +647,7 @@ module main_32ch (
             tx_frm_valid   <= 1'b0;
             tx_evt_cnt     <= 6'd0;
             fifo_async_rd_en <= 1'b0;
+            sc_fifo_rd_en    <= 1'b0;
         end else begin
             case (tx_frm_state)
                 // 空闲：慢控优先，其次事件
@@ -656,8 +655,9 @@ module main_32ch (
                     tx_frm_data  <= 16'hBC3C;
                     tx_frm_valid <= 1'b0;
                     fifo_async_rd_en <= 1'b0;
-                    if (sc_fifo_valid) begin
-                        // 慢控回复帧头
+                    sc_fifo_rd_en    <= 1'b0;
+                    if (~sc_fifo_empty) begin
+                        // 慢控回复帧头：先只发 FFF1 头，不预读 FIFO
                         tx_frm_state <= TX_FRM_SC;
                         tx_frm_data  <= 16'hFFF1;
                         tx_frm_valid <= 1'b1;
@@ -669,14 +669,12 @@ module main_32ch (
                         tx_evt_cnt   <= 6'd0;
                     end
                 end
-                // 慢控回复：转发 sc_fifo_dout，直到空
+                // 慢控回复：只读出一个数据字并发送，随即回到 IDLE（不排空 FIFO）
                 TX_FRM_SC: begin
                     tx_frm_data  <= sc_fifo_dout;
-                    tx_frm_valid <= sc_fifo_valid;
-                    fifo_async_rd_en <= 1'b0;
-                    if (~sc_fifo_valid) begin
-                        tx_frm_state <= TX_FRM_IDLE;
-                    end
+                    tx_frm_valid <= 1'b1;
+                    sc_fifo_rd_en <= ~sc_fifo_empty;   // 有一个字就弹掉这一个
+                    tx_frm_state <= TX_FRM_IDLE;
                 end
                 // ADC 事件：转发 fifo_async_data_out，共 EVT_WORDS 个
                 TX_FRM_EVT: begin
@@ -692,6 +690,7 @@ module main_32ch (
                 end
                 default: begin
                     tx_frm_state <= TX_FRM_IDLE;
+                    sc_fifo_rd_en <= 1'b0;
                 end
             endcase
         end
@@ -728,7 +727,8 @@ module main_32ch (
 
         // FIFO 读侧（txoutclk 域）
         .sc_fifo_dout  (sc_fifo_dout),
-        .sc_fifo_valid (sc_fifo_valid),
+        .sc_fifo_rd_en (sc_fifo_rd_en),
+        .sc_fifo_empty (sc_fifo_empty),
 
         // 标志
         .slow_control_active   (slow_control_active),
@@ -775,7 +775,4 @@ module main_32ch (
         .tdc_cali_en(tdc_cali_en),
         .cali_flag  (cali_flag)
     );
-
-    wire fifo_sync_prog_full_any;
-    assign fifo_sync_prog_full_any = |fifo_sync_prog_full;
 endmodule

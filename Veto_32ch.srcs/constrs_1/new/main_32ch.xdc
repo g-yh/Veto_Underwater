@@ -6,11 +6,6 @@ create_clock -name clk_sys_200M -period 5.0 [get_ports clk_200M_p]
 
 set_property DIFF_TERM TRUE [get_ports clk_200M_p]
 
-# GT CLK 156.25M
-set_property PACKAGE_PIN N8 [get_ports gt_refclk_15625_p]
-set_property PACKAGE_PIN N7 [get_ports gt_refclk_15625_n]
-
-create_clock -name gt_refclk -period 6.4 [get_ports gt_refclk_15625_p]
 
 # GT CLK
 set_property PACKAGE_PIN J8 [get_ports clk_gtx_125M_p]
@@ -21,11 +16,6 @@ create_clock -name clk_sys_125M -period 8.0 [get_ports clk_gtx_125M_p]
 set_property PACKAGE_PIN U20 [get_ports clk_125M_en]
 set_property IOSTANDARD LVCMOS33 [get_ports clk_125M_en]
 
-# uart
-set_property PACKAGE_PIN R29 [get_ports uart_tx]
-set_property PACKAGE_PIN P29 [get_ports uart_rx]
-
-set_property IOSTANDARD LVCMOS33 [get_ports uart*]
 
 # si5345
 set_property PACKAGE_PIN G28 [get_ports si5345_clk_in0_p]
@@ -482,7 +472,7 @@ set_property IOSTANDARD LVDS_25 [get_ports {max40026_p[*]}]
 set_property IOSTANDARD LVDS_25 [get_ports {max40026_n[*]}]
 
 # tdc
-set_false_path -from [get_clocks gt_refclk] -to [get_clocks clk_sys_200M]
+# set_false_path -from [get_clocks gt_refclk] -to [get_clocks clk_sys_200M]
 # set_property LOC SLICE_X75Y125 [get_cells instance_tdc/instance_tdl/instance_carry4_init]
 
 # GT
@@ -503,3 +493,7 @@ set_property PACKAGE_PIN H1 [get_ports SFP1_tx_n]
 
 # set_property PACKAGE_PIN F2 [get_ports SFP2_tx_p]
 # set_property PACKAGE_PIN F1 [get_ports SFP2_tx_n]
+
+# led debug
+set_property PACKAGE_PIN R19 [get_ports gt_link_up_out_led]
+set_property IOSTANDARD LVCMOS33 [get_ports gt_link_up_out_led]

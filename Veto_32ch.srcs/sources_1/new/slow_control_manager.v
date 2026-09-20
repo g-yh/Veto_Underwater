@@ -69,7 +69,10 @@ module slow_control_manager #(
     // tdc
     input  wire [10*ADC_NUM*CHANNEL_NUM - 1:0] tdc_cali_in,
     input  wire [   ADC_NUM*CHANNEL_NUM - 1:0] tdc_cali_en,
-    output reg  [   ADC_NUM*CHANNEL_NUM - 1:0] cali_flag
+    output reg  [   ADC_NUM*CHANNEL_NUM - 1:0] cali_flag,
+
+    output reg  [ 5:0] state,
+    output reg  [ 5:0] next_state
 );
 
     //--------------------------------
@@ -134,8 +137,8 @@ module slow_control_manager #(
     localparam TDC_CALI = 6'd25;
     localparam TDC_CALI_SEND_DATA = 6'd26;
 
-    reg  [ 5:0] state;
-    reg  [ 5:0] next_state;
+    // reg  [ 5:0] state;
+    // reg  [ 5:0] next_state;
 
     // 发送节拍：每个发送状态内对发出的字做 1 拍间隔
     reg send_phase;   // 0=本拍发数据，1=间隔后退出

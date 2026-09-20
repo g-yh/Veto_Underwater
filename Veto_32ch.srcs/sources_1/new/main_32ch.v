@@ -99,12 +99,15 @@ module main_32ch (
     assign uart_tx = 1'b1;
 
     wire rst_n;
+    wire rst_n_used;
     wire trig_rst_n;
     (* dont_touch="true" *) vio_0 vio_inst (
         .clk       (clk_200M),            // input wire clk
         .probe_out0(rst_n),
         .probe_out1(trig_rst_n)
     );
+
+    // assign rst_n = 1'b1;
 
     //--------------------------------
     // clock manager
@@ -643,7 +646,6 @@ module main_32ch (
     always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
         if (!rst_n) begin
             tx_frm_state   <= TX_FRM_IDLE;
-            tx_frm_data    <= 16'hBC3C;
             tx_frm_valid   <= 1'b0;
             tx_evt_cnt     <= 6'd0;
             fifo_async_rd_en <= 1'b0;
@@ -652,7 +654,6 @@ module main_32ch (
             case (tx_frm_state)
                 // 空闲：慢控优先，其次事件
                 TX_FRM_IDLE: begin
-                    tx_frm_data  <= 16'hBC3C;
                     tx_frm_valid <= 1'b0;
                     fifo_async_rd_en <= 1'b0;
                     sc_fifo_rd_en    <= 1'b0;
@@ -773,6 +774,69 @@ module main_32ch (
         // tdc
         .tdc_cali_in(tdc_cali_in),
         .tdc_cali_en(tdc_cali_en),
-        .cali_flag  (cali_flag)
+        .cali_flag  (cali_flag),
+
+        .state(sc_state),
+        .next_state(sc_next_state)
+    );
+
+    wire [5:0] sc_state;
+    wire [5:0] sc_next_state;
+    //--------------------------------
+    // ILA debug (added for board bring-up)
+    //--------------------------------
+    ila_rxout u_ila_rxout (
+        .clk (clk_rxoutclk_bufg),
+        .probe0 (ad9253_data_chx[15:0]),
+        .probe1 (tdc_raw_rise[10:0]),
+        .probe2 (ringbuffer_trig[0]),
+        .probe3 (ringbuffer_data_valid[0]),
+        .probe4 (fifo_sync_dout[15:0]),
+        .probe5 (fifo_sync_valid[0]),
+        .probe6 (fifo_sync_prog_full[0]),
+        .probe7 (fifo_sync_empty[0]),
+        .probe8 (arbiter_out[15:0]),
+        .probe9 (fifo_async_wr_en),
+        .probe10(fifo_async_prog_full),
+        .probe11(fifo_async_full),
+        .probe12(current_ch[4:0]),
+        .probe13(ad9253_fco_rise),
+        .probe14(idelay_ld),
+        .probe15(si5345_lolb),
+        .probe16(bitslip_chx[1:0]),
+        .probe17(ad9253_config_done[7:0]),
+        .probe18(user_rx_data[15:0]),
+        .probe19(user_rx_data_valid),
+        .probe20(brd_num[7:0]),
+        .probe21(slow_control_active),
+        .probe22(sc_state),
+        .probe23(sc_next_state)
+    );
+
+    ila_txout u_ila_txout (
+        .clk (clk_txoutclk_bufg),
+        .probe0 (tx_frm_state[1:0]),
+        .probe1 (tx_frm_valid),
+        .probe2 (tx_frm_data[15:0]),
+        .probe3 (tx_evt_cnt[5:0]),
+        .probe4 (fifo_async_data_out[15:0]),
+        .probe5 (fifo_async_rd_en),
+        .probe6 (fifo_async_prog_empty),
+        .probe7 (fifo_async_empty),
+        .probe8 (sc_fifo_dout[15:0]),
+        .probe9 (sc_fifo_empty),
+        .probe10(sc_fifo_rd_en),
+        .probe11(gt_tx_data[15:0]),
+        .probe12(gt_tx_data_valid),
+        .probe13(gt_rx_data[15:0]),
+        .probe14(gt_rx_data_valid),
+        .probe15(rx_data_is_comma[1:0]),
+        .probe16(gtx_cpll_is_lock),
+        .probe17(rx_reset_done),
+        .probe18(gtx_rx_error),
+        .probe19(rx_pma_rst_n),
+        .probe20(gt_link_up),
+        .probe21(user_tx_data_mux),
+        .probe22(user_tx_data_valid_mux)
     );
 endmodule

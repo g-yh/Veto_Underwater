@@ -621,18 +621,21 @@ module main_32ch (
     wire slow_control_flag;
     assign slow_control_flag = slow_control_active;
 
-    //--------------------------------
-    // GT 发送帧头状态机：区分 慢控回复 与 ADC 事件数据
-    //   慢控回复: 16'hFFF1 + 1 个 word
-    //   ADC 事件: 16'hFFF0 + TRIG_TOTAL+HEAD_LEN 个 word
-    //   空闲:      16'hBC3C
-    //--------------------------------
-    localparam TX_FRM_IDLE = 2'd0;
-    localparam TX_FRM_SC   = 2'd1;
-    localparam TX_FRM_EVT  = 2'd2;
+     //--------------------------------
+     // GT 发送帧头状态机：区分 慢控回复/W-packet Ack 与 ADC 事件数据
+     //   W-packet ack: 16'hFFF3 + 16'hFFFF (1 word)
+     //   慢控回复: 16'hFFF1 + 1 个 word
+     //   ADC 事件: 16'hFFF0 + TRIG_TOTAL+HEAD_LEN 个 word
+     //   空闲:      16'hBC3C
+     //--------------------------------
+     localparam TX_FRM_IDLE = 2'd0;
+     localparam TX_FRM_SC   = 2'd1;
+     localparam TX_FRM_EVT  = 2'd2;
+     localparam TX_FRM_ACK  = 2'd3;
 
-    reg [1:0] tx_frm_state;
-    reg [5:0] tx_evt_cnt;
+     reg [1:0] tx_frm_state;
+     reg [5:0] tx_evt_cnt;
+     reg [15:0] sc_dout_cached;
 
     // 事件数据长度（word）
     localparam EVT_WORDS = TRIG_TOTAL + HEAD_LEN;
@@ -653,14 +656,19 @@ module main_32ch (
         end else begin
             case (tx_frm_state)
                 // 空闲：慢控优先，其次事件
-                TX_FRM_IDLE: begin
+                 TX_FRM_IDLE: begin
                     tx_frm_valid <= 1'b0;
                     fifo_async_rd_en <= 1'b0;
                     sc_fifo_rd_en    <= 1'b0;
                     if (~sc_fifo_empty) begin
-                        // 慢控回复帧头：先只发 FFF1 头，不预读 FIFO
-                        tx_frm_state <= TX_FRM_SC;
-                        tx_frm_data  <= 16'hFFF1;
+                        sc_dout_cached <= sc_fifo_dout;
+                        if (sc_fifo_dout == 16'hFFFF) begin
+                            tx_frm_state <= TX_FRM_ACK;
+                            tx_frm_data  <= 16'hFFF3;
+                        end else begin
+                            tx_frm_state <= TX_FRM_SC;
+                            tx_frm_data  <= 16'hFFF1;
+                        end
                         tx_frm_valid <= 1'b1;
                     end else if (~fifo_async_prog_empty) begin
                         // 至少一个完整事件已缓冲
@@ -672,9 +680,16 @@ module main_32ch (
                 end
                 // 慢控回复：只读出一个数据字并发送，随即回到 IDLE（不排空 FIFO）
                 TX_FRM_SC: begin
-                    tx_frm_data  <= sc_fifo_dout;
+                    tx_frm_data  <= sc_dout_cached;
                     tx_frm_valid <= 1'b1;
-                    sc_fifo_rd_en <= ~sc_fifo_empty;   // 有一个字就弹掉这一个
+                    sc_fifo_rd_en <= ~sc_fifo_empty;
+                    tx_frm_state <= TX_FRM_IDLE;
+                end
+                // W-packet ack: 0xFFF3 + ack marker (0xFFFF)
+                TX_FRM_ACK: begin
+                    tx_frm_data  <= sc_dout_cached;
+                    tx_frm_valid <= 1'b1;
+                    sc_fifo_rd_en <= ~sc_fifo_empty;
                     tx_frm_state <= TX_FRM_IDLE;
                 end
                 // ADC 事件：转发 fifo_async_data_out，共 EVT_WORDS 个

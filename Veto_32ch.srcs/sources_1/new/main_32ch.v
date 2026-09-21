@@ -283,7 +283,7 @@ module main_32ch (
 
     //--------------------------------
     // max40026
-    //--------------------------------    
+    //--------------------------------
     wire [ADC_NUM*CHANNEL_NUM-1:0] max40026_ch;
 
     // 差分转单端
@@ -809,6 +809,7 @@ module main_32ch (
             ack_req_r2 <= ack_req_r1;
         end
     end
+    assign ack_req = ack_req_r2;
     //--------------------------------
     // ILA debug (added for board bring-up)
     //--------------------------------

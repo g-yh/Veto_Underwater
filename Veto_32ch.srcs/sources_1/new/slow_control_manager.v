@@ -195,17 +195,11 @@ module slow_control_manager #(
     reg [ 4:0] tdc_num;
 
      // 状态寄存器
-    reg w_ack_pending;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= IDLE;
-            w_ack_pending <= 1'b0;
         end else begin
             state <= next_state;
-            if (rx_use)
-                w_ack_pending <= 1'b1;
-            else if (state == IDLE && w_ack_pending)
-                w_ack_pending <= 1'b0;
         end
     end
 
@@ -371,6 +365,57 @@ module slow_control_manager #(
         endcase
     end
 
+    //--------------------------------
+    // 发送 FIFO 数据和有效信号 (rx_use 优先级最高：每次 rx_use 都推送 0xFFFF ack)
+    //--------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            slow_control_data       <= 16'd0;
+            slow_control_data_valid <= 1'b0;
+        end else if (rx_use) begin
+            slow_control_data       <= 16'hFFFF;
+            slow_control_data_valid <= 1'b1;
+        end else begin
+            case (state)
+                SEND_SI5345_DATA: begin
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {8'b0, si5345_data_out[7:0]};
+                        slow_control_data_valid <= 1'b1;
+                    end else begin
+                        slow_control_data_valid <= 1'b0;
+                    end
+                end
+                SEND_AD9253_DATA: begin
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {8'b0, ad9253_data_out[7:0]};
+                        slow_control_data_valid <= 1'b1;
+                    end else begin
+                        slow_control_data_valid <= 1'b0;
+                    end
+                end
+                SEND_TEST_DATA: begin
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {8'b0, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
+                        slow_control_data_valid <= 1'b1;
+                    end else begin
+                        slow_control_data_valid <= 1'b0;
+                    end
+                end
+                TDC_CALI_SEND_DATA: begin
+                    if (send_phase == 1'b0) begin
+                        slow_control_data       <= {6'b0, tdc_bin};
+                        slow_control_data_valid <= 1'b1;
+                    end else begin
+                        slow_control_data_valid <= 1'b0;
+                    end
+                end
+                default: begin
+                    slow_control_data_valid <= 1'b0;
+                end
+            endcase
+        end
+    end
+
     // 主要控制逻辑
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -428,8 +473,6 @@ module slow_control_manager #(
 
             // 发送
             send_phase <= 1'b0;
-            slow_control_data <= 16'd0;
-            slow_control_data_valid <= 1'b0;
         end else begin
             case (state)
                 IDLE: begin
@@ -485,12 +528,6 @@ module slow_control_manager #(
 
                     // 发送
                     send_phase <= 1'b0;
-                    if (w_ack_pending) begin
-                        slow_control_data       <= 16'hFFFF;
-                        slow_control_data_valid <= 1'b1;
-                    end else begin
-                        slow_control_data_valid <= 1'b0;
-                    end
                 end
 
                 GET_SI5345_CONF_BYTES: begin
@@ -574,11 +611,8 @@ module slow_control_manager #(
 
                 SEND_SI5345_DATA: begin
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {8'b0, si5345_data_out[7:0]};
-                        slow_control_data_valid <= 1'b1;
                         send_phase              <= 1'b1;
                     end else begin
-                        slow_control_data_valid <= 1'b0;
                         send_phase              <= 1'b0;
                     end
                 end
@@ -753,12 +787,9 @@ module slow_control_manager #(
 
                 SEND_AD9253_DATA: begin
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {8'b0, ad9253_data_out[7:0]};
-                        slow_control_data_valid <= 1'b1;
-                        send_phase              <= 1'b1;
+                        send_phase <= 1'b1;
                     end else begin
-                        slow_control_data_valid <= 1'b0;
-                        send_phase              <= 1'b0;
+                        send_phase <= 1'b0;
                     end
                 end
 
@@ -777,12 +808,9 @@ module slow_control_manager #(
 
                 SEND_TEST_DATA: begin
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {8'b0, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
-                        slow_control_data_valid <= 1'b1;
-                        send_phase              <= 1'b1;
+                        send_phase <= 1'b1;
                     end else begin
-                        slow_control_data_valid <= 1'b0;
-                        send_phase              <= 1'b0;
+                        send_phase <= 1'b0;
                     end
                 end
 
@@ -859,15 +887,10 @@ module slow_control_manager #(
 
                 TDC_CALI_SEND_DATA: begin
                     if (send_phase == 1'b0) begin
-                        slow_control_data       <= {6'b0, tdc_bin};
-                        slow_control_data_valid <= 1'b1;
-                        send_phase              <= 1'b1;
+                        send_phase <= 1'b1;
                     end else begin
-                        slow_control_data_valid <= 1'b0;
-                        if (!slow_control_data_valid) begin
-                            tdc_cali_done <= 1'b1;
-                            send_phase    <= 1'b0;
-                        end
+                        tdc_cali_done <= 1'b1;
+                        send_phase <= 1'b0;
                     end
                 end
 

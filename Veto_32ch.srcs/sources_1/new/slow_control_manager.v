@@ -28,6 +28,7 @@ module slow_control_manager #(
     // 标志
     output wire        slow_control_active,   // 慢控传输进行中（state != IDLE）
     output reg  [7:0]  brd_num,               // 锁存的板子编号
+    output wire        ack_req,                // 收到数据需回复ack帧
 
     // Si5345接口
     input  wire        si5345_spi_busy,
@@ -87,6 +88,16 @@ module slow_control_manager #(
     reg brd_num_set;
     wire addr_match = brd_num_set ? (rx_addr == brd_num) : 1'b1;
     wire rx_use = rx_valid_pulse & addr_match;
+
+    // ack_req: 每次 rx_use 都拉高一个周期，main 据此发送 FFF3+FFFF ack 帧
+    reg ack_req_r;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            ack_req_r <= 1'b0;
+        else
+            ack_req_r <= rx_use;
+    end
+    assign ack_req = ack_req_r;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -372,9 +383,6 @@ module slow_control_manager #(
         if (!rst_n) begin
             slow_control_data       <= 16'd0;
             slow_control_data_valid <= 1'b0;
-        end else if (rx_use) begin
-            slow_control_data       <= 16'hFFFF;
-            slow_control_data_valid <= 1'b1;
         end else begin
             case (state)
                 SEND_SI5345_DATA: begin

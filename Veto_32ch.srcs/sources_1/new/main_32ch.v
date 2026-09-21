@@ -660,15 +660,14 @@ module main_32ch (
                     tx_frm_valid <= 1'b0;
                     fifo_async_rd_en <= 1'b0;
                     sc_fifo_rd_en    <= 1'b0;
-                    if (~sc_fifo_empty) begin
+                    if (ack_req) begin
+                        tx_frm_state <= TX_FRM_ACK;
+                        tx_frm_data  <= 16'hFFF3;
+                        tx_frm_valid <= 1'b1;
+                    end else if (~sc_fifo_empty) begin
                         sc_dout_cached <= sc_fifo_dout;
-                        if (sc_fifo_dout == 16'hFFFF) begin
-                            tx_frm_state <= TX_FRM_ACK;
-                            tx_frm_data  <= 16'hFFF3;
-                        end else begin
-                            tx_frm_state <= TX_FRM_SC;
-                            tx_frm_data  <= 16'hFFF1;
-                        end
+                        tx_frm_state <= TX_FRM_SC;
+                        tx_frm_data  <= 16'hFFF1;
                         tx_frm_valid <= 1'b1;
                     end else if (~fifo_async_prog_empty) begin
                         // 至少一个完整事件已缓冲
@@ -687,9 +686,8 @@ module main_32ch (
                 end
                 // W-packet ack: 0xFFF3 + ack marker (0xFFFF)
                 TX_FRM_ACK: begin
-                    tx_frm_data  <= sc_dout_cached;
+                    tx_frm_data  <= 16'hFFFF;
                     tx_frm_valid <= 1'b1;
-                    sc_fifo_rd_en <= ~sc_fifo_empty;
                     tx_frm_state <= TX_FRM_IDLE;
                 end
                 // ADC 事件：转发 fifo_async_data_out，共 EVT_WORDS 个
@@ -748,6 +746,7 @@ module main_32ch (
 
         // 标志
         .slow_control_active   (slow_control_active),
+        .ack_req               (ack_req_raw),
         .brd_num               (brd_num),
 
         // Si5345接口
@@ -797,6 +796,19 @@ module main_32ch (
 
     wire [5:0] sc_state;
     wire [5:0] sc_next_state;
+
+    // ack_req 跨时钟域同步（rxoutclk -> txoutclk）
+    reg ack_req_r1, ack_req_r2;
+    wire ack_req;
+    always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
+        if (!rst_n) begin
+            ack_req_r1 <= 1'b0;
+            ack_req_r2 <= 1'b0;
+        end else begin
+            ack_req_r1 <= ack_req_raw;
+            ack_req_r2 <= ack_req_r1;
+        end
+    end
     //--------------------------------
     // ILA debug (added for board bring-up)
     //--------------------------------

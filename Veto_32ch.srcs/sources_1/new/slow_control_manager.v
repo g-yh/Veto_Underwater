@@ -9,7 +9,8 @@
 //          之后再收到的数据高 8 位与 brd_num 匹配才处理。
 module slow_control_manager #(
     parameter ADC_NUM = 8,
-    parameter CHANNEL_NUM = 4
+    parameter CHANNEL_NUM = 4,
+    parameter CLK_FREQ = 125_000_000  // rxoutclk 频率 (Hz)，超时看门狗用
 ) (
     input  wire clk,       // rxoutclk 域（状态机 + FIFO 写侧）
     input  wire clk_tx,    // txoutclk 域（FIFO 读侧）
@@ -20,10 +21,11 @@ module slow_control_manager #(
     input  wire        user_rx_data_valid,
 
     // FIFO 读侧（txoutclk 域，供 main 接 GT user_tx_data）
-    //   握手：main 通过 sc_fifo_empty 判断是否有数据，用 sc_fifo_rd_en 逐字弹出
+    //   握手：main 用 sc_fifo_rd_en 发起读，待 slow_control_data_valid 有效后取 sc_fifo_dout
     output wire [15:0] sc_fifo_dout,
-    input  wire        sc_fifo_rd_en,     // main 控制读（txoutclk 域）
-    output wire        sc_fifo_empty,    // FIFO 真实空标志（txoutclk 域）
+    input  wire        sc_fifo_rd_en,          // main 控制读（txoutclk 域）
+    output wire        sc_fifo_empty,          // FIFO 真实空标志（txoutclk 域）
+    output wire        slow_control_data_valid, // FIFO 读数据有效（txoutclk 域）
 
     // 标志
     output wire        slow_control_active,   // 慢控传输进行中（state != IDLE）
@@ -86,7 +88,12 @@ module slow_control_manager #(
 
     // brd_num 锁存 + 板号匹配
     reg brd_num_set;
-    wire addr_match = brd_num_set ? (rx_addr == brd_num) : 1'b1;
+    wire rx_addr_valid = (rx_addr >= 8'd1) && (rx_addr <= 8'd8);
+    wire rx_is_command = (rx_data >= 8'hF0) && (rx_data <= 8'hF7);
+    // 如果复位后先收到残留数据，允许在 IDLE 遇到新的合法命令时重新锁定板号。
+    wire addr_match = !brd_num_set ||
+                      (rx_addr == brd_num) ||
+                      ((state == 6'd0) && rx_addr_valid && rx_is_command);
     wire rx_use = rx_valid_pulse & addr_match;
 
     // ack_req: 每次 rx_use 都拉高一个周期，main 据此发送 FFF3+FFFF ack 帧
@@ -103,7 +110,9 @@ module slow_control_manager #(
         if (!rst_n) begin
             brd_num    <= 8'd0;
             brd_num_set <= 1'b0;
-        end else if (rx_valid_pulse && !brd_num_set) begin
+        end else if (rx_valid_pulse && rx_addr_valid &&
+                     (!brd_num_set ||
+                      ((state == 6'd0) && rx_is_command))) begin
             brd_num     <= rx_addr;
             brd_num_set <= 1'b1;
         end
@@ -153,6 +162,10 @@ module slow_control_manager #(
 
     // 发送节拍：每个发送状态内对发出的字做 1 拍间隔
     reg send_phase;   // 0=本拍发数据，1=间隔后退出
+
+    // FIFO 写侧数据（必须在主状态机之前声明）
+    reg [15:0] slow_control_data;
+    reg        slow_control_wr_en;
 
     // 计数器和控制信号
     reg  [ 1:0] si5345_receive_conf_bytes_counter;
@@ -206,8 +219,29 @@ module slow_control_manager #(
     reg [ 4:0] tdc_num;
 
      // 状态寄存器
+    // 看门狗：state 停留超过 5 秒无变化则强制回 IDLE
+    localparam TIMEOUT_CYCLES = CLK_FREQ * 5;  // 5 秒 = 625,000,000 @125MHz
+    reg [31:0] wd_cnt;
+    reg [ 5:0] state_d;
+    wire       wd_timeout = (wd_cnt >= TIMEOUT_CYCLES);
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            wd_cnt <= 32'd0;
+            state_d <= IDLE;
+        end else begin
+            state_d <= state;
+            if (state == IDLE || state != state_d)
+                wd_cnt <= 32'd0;
+            else
+                wd_cnt <= wd_cnt + 32'd1;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= IDLE;
+        end else if (wd_timeout) begin
             state <= IDLE;
         end else begin
             state <= next_state;
@@ -258,7 +292,7 @@ module slow_control_manager #(
 
             READ_SI5345_REG: begin
                 if (si5345_spi_done) begin
-                    if (si5345_read_done) next_state = SEND_SI5345_DATA;
+                    if (si5345_byte_counter >= 4'd8) next_state = SEND_SI5345_DATA;
                     else next_state = RECEIVE_SI5345_READ_DATA;
                 end else next_state = READ_SI5345_REG;
             end
@@ -376,54 +410,6 @@ module slow_control_manager #(
         endcase
     end
 
-    //--------------------------------
-    // 发送 FIFO 数据和有效信号 (rx_use 优先级最高：每次 rx_use 都推送 0xFFFF ack)
-    //--------------------------------
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            slow_control_data       <= 16'd0;
-            slow_control_data_valid <= 1'b0;
-        end else begin
-            case (state)
-                SEND_SI5345_DATA: begin
-                    if (send_phase == 1'b0) begin
-                        slow_control_data       <= {8'b0, si5345_data_out[7:0]};
-                        slow_control_data_valid <= 1'b1;
-                    end else begin
-                        slow_control_data_valid <= 1'b0;
-                    end
-                end
-                SEND_AD9253_DATA: begin
-                    if (send_phase == 1'b0) begin
-                        slow_control_data       <= {8'b0, ad9253_data_out[7:0]};
-                        slow_control_data_valid <= 1'b1;
-                    end else begin
-                        slow_control_data_valid <= 1'b0;
-                    end
-                end
-                SEND_TEST_DATA: begin
-                    if (send_phase == 1'b0) begin
-                        slow_control_data       <= {8'b0, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
-                        slow_control_data_valid <= 1'b1;
-                    end else begin
-                        slow_control_data_valid <= 1'b0;
-                    end
-                end
-                TDC_CALI_SEND_DATA: begin
-                    if (send_phase == 1'b0) begin
-                        slow_control_data       <= {6'b0, tdc_bin};
-                        slow_control_data_valid <= 1'b1;
-                    end else begin
-                        slow_control_data_valid <= 1'b0;
-                    end
-                end
-                default: begin
-                    slow_control_data_valid <= 1'b0;
-                end
-            endcase
-        end
-    end
-
     // 主要控制逻辑
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -482,6 +468,7 @@ module slow_control_manager #(
             // 发送
             send_phase <= 1'b0;
         end else begin
+            slow_control_wr_en <= 1'b0;
             case (state)
                 IDLE: begin
                     si5345_conf_bytes <= 0;
@@ -613,15 +600,18 @@ module slow_control_manager #(
                     end
 
                     if (si5345_byte_counter >= 4'd8 && si5345_spi_done) begin
+                        slow_control_data <= {8'b0, si5345_data_out[7:0]};
                         si5345_read_done <= 1;
                     end
                 end
 
                 SEND_SI5345_DATA: begin
                     if (send_phase == 1'b0) begin
-                        send_phase              <= 1'b1;
+                        slow_control_wr_en <= 1'b1;
+                        send_phase         <= 1'b1;
                     end else begin
-                        send_phase              <= 1'b0;
+                        slow_control_wr_en <= 1'b0;
+                        send_phase         <= 1'b0;
                     end
                 end
 
@@ -787,6 +777,7 @@ module slow_control_manager #(
                                 ad9253_byte_three <= 0;
                                 cs_n_wait_flag <= 0;
                                 cs_n_delay_counter <= 0;
+                                slow_control_data <= {8'b0, ad9253_data_out[7:0]};
                                 ad9253_read_done <= 1;
                             end
                         end
@@ -795,9 +786,11 @@ module slow_control_manager #(
 
                 SEND_AD9253_DATA: begin
                     if (send_phase == 1'b0) begin
-                        send_phase <= 1'b1;
+                        slow_control_wr_en <= 1'b1;
+                        send_phase         <= 1'b1;
                     end else begin
-                        send_phase <= 1'b0;
+                        slow_control_wr_en <= 1'b0;
+                        send_phase         <= 1'b0;
                     end
                 end
 
@@ -815,10 +808,13 @@ module slow_control_manager #(
                 end
 
                 SEND_TEST_DATA: begin
+                    slow_control_data <= {8'b0, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
                     if (send_phase == 1'b0) begin
-                        send_phase <= 1'b1;
+                        slow_control_wr_en <= 1'b1;
+                        send_phase         <= 1'b1;
                     end else begin
-                        send_phase <= 1'b0;
+                        slow_control_wr_en <= 1'b0;
+                        send_phase         <= 1'b0;
                     end
                 end
 
@@ -894,11 +890,14 @@ module slow_control_manager #(
                 end
 
                 TDC_CALI_SEND_DATA: begin
+                    slow_control_data <= {6'b0, tdc_bin};
                     if (send_phase == 1'b0) begin
-                        send_phase <= 1'b1;
+                        slow_control_wr_en <= 1'b1;
+                        send_phase         <= 1'b1;
                     end else begin
-                        tdc_cali_done <= 1'b1;
-                        send_phase <= 1'b0;
+                        slow_control_wr_en <= 1'b0;
+                        tdc_cali_done      <= 1'b1;
+                        send_phase         <= 1'b0;
                     end
                 end
 
@@ -913,8 +912,6 @@ module slow_control_manager #(
     //--------------------------------
     // 发送 FIFO：rxoutclk 写，txoutclk 读
     //--------------------------------
-    reg [15:0] slow_control_data;
-    reg        slow_control_data_valid;
     wire       sc_fifo_full;
 
     fifo_slow_control u_fifo_slow_control (
@@ -922,11 +919,12 @@ module slow_control_manager #(
         .wr_clk     (clk),          // rxoutclk
         .rd_clk     (clk_tx),       // txoutclk
         .din        (slow_control_data),
-        .wr_en      (slow_control_data_valid & ~sc_fifo_full),
+        .wr_en      (slow_control_wr_en & ~sc_fifo_full),
         .rd_en      (sc_fifo_rd_en),
         .dout       (sc_fifo_dout),
         .full       (sc_fifo_full),
         .empty      (sc_fifo_empty),
+        .valid      (slow_control_data_valid),
         .wr_rst_busy(),
         .rd_rst_busy()
     );

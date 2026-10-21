@@ -91,6 +91,8 @@ module main_32ch (
     localparam TRIG_PRE = 16'd10;
     localparam HEAD_LEN = 16'd7;
 
+    wire gt_link_up;
+
     assign clk_125M_en = 1;
     assign SFP_tx_disable1 = 0;
     assign SFP_tx_disable2 = 0;
@@ -101,25 +103,33 @@ module main_32ch (
     wire rst_n;
     wire rst_n_used;
     wire trig_rst_n;
+    wire clk_200M;
+    wire clk_txoutclk_bufg;
+    wire clk_rxoutclk_bufg;
+    wire [ADC_NUM-1:0] ad9253_config_done;
+    wire [5:0] sc_state;
+    wire [5:0] sc_next_state;
+    wire [ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_prog_full;
+    wire ack_req;
     (* dont_touch="true" *) vio_0 vio_inst (
         .clk       (clk_200M),            // input wire clk
         .probe_out0(rst_n),
         .probe_out1(trig_rst_n)
     );
 
-    // assign rst_n = 1'b1;
+    // assign rst_n = clk_locked;
 
     //--------------------------------
     // clock manager
     //--------------------------------
     wire clk_400M;
-    wire clk_200M;
     wire clk_15625M;
     wire clk_125M;
     wire clk_100M;
     wire clk_20M;
 
     wire clk_gtx_125M;
+    wire clk_locked;
 
     clock_manager instance_clock_manager (
         .clk_200M_p(clk_200M_p),
@@ -132,7 +142,9 @@ module main_32ch (
         .clk_125M(clk_125M),
         .clk_100M(clk_100M),
         .clk_20M(clk_20M),
-        .clk_gtx_125M(clk_gtx_125M)
+        .clk_gtx_125M(clk_gtx_125M),
+
+        .clk_locked(clk_locked)
     );
 
     //--------------------------------
@@ -404,7 +416,6 @@ module main_32ch (
     wire [ADC_NUM*CHANNEL_NUM*16-1:0] fifo_sync_dout;
     wire [   ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_full;
     wire [   ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_empty;
-    wire [   ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_prog_full;
     wire [   ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_prog_empty;
     wire [   ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_valid;
 
@@ -421,7 +432,7 @@ module main_32ch (
                 .wr_en(fifo_sync_wr_en[fs_idx]),  // input wire wr_en
                 .rd_en(fifo_sync_rd_en[fs_idx]),  // input wire rd_en
                 .prog_empty_thresh(TRIG_TOTAL + HEAD_LEN),  // input wire [10 : 0] prog_empty_thresh
-                .prog_full_thresh(11'd2048 - (TRIG_TOTAL + HEAD_LEN)),  // input wire [10 : 0] prog_full_thresh
+                .prog_full_thresh(12'd2048 - (TRIG_TOTAL + HEAD_LEN)),  // input wire [10 : 0] prog_full_thresh
                 .dout(fifo_sync_dout[fs_idx*16+:16]),  // output wire [15 : 0] dout
                 .full(fifo_sync_full[fs_idx]),  // output wire full
                 .empty(fifo_sync_empty[fs_idx]),  // output wire empty
@@ -438,6 +449,7 @@ module main_32ch (
     wire [15:0] arbiter_out;
     wire        fifo_async_wr_en;
     wire [ 4:0] current_ch;
+    wire        fifo_async_prog_full;
 
     arbiter_32ch #(
         .TRIG_WIDTH(16),
@@ -463,7 +475,6 @@ module main_32ch (
     wire [15:0] fifo_async_data_out;
     wire        fifo_async_full;
     wire        fifo_async_empty;
-    wire        fifo_async_prog_full;
     wire        fifo_async_prog_empty;
 
     fifo_async_gt inst_fifo_async_gt (
@@ -474,7 +485,7 @@ module main_32ch (
         .wr_en(fifo_async_wr_en),
         .rd_en(fifo_async_rd_en),
         .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN)),
-        .prog_full_thresh(11'd2048 - (TRIG_TOTAL + HEAD_LEN)),
+        .prog_full_thresh(12'd2048 - (TRIG_TOTAL + HEAD_LEN)),
         .dout(fifo_async_data_out),
         .full(fifo_async_full),
         .empty(fifo_async_empty),
@@ -484,16 +495,11 @@ module main_32ch (
         .rd_rst_busy()
     );
 
-
-
     // --------------------------------
     // gtx_interface
     // --------------------------------
     wire rx_pma_rst_n;
     wire rx_reset_done;
-
-    wire clk_txoutclk_bufg;
-    wire clk_rxoutclk_bufg;
 
     wire [15:0] gt_tx_data;
     wire gt_tx_data_valid;
@@ -544,7 +550,6 @@ module main_32ch (
     wire [63:0] ptp_timestamp_rx;
 
     wire [3:0] ptp_flags;
-    wire gt_link_up;
     wire ptp_working;
 
     //--------------------------------
@@ -560,6 +565,7 @@ module main_32ch (
     // FIFO 读侧（txoutclk 域，main 控制读）
     wire [15:0] sc_fifo_dout;
     wire        sc_fifo_empty;
+    wire        slow_control_data_valid;
     reg         sc_fifo_rd_en;
 
     time_sync_manager instance_time_sync_manager (
@@ -568,6 +574,7 @@ module main_32ch (
         .clk_sys_400M       (clk_400M),
         .clk_drp_100M       (clk_100M),
         .clk_uart           (clk_200M),
+        .fifo_rst_n         (rst_n),
 
         // gtx data
         .gt_tx_data         (gt_tx_data),
@@ -628,23 +635,24 @@ module main_32ch (
      //   ADC 事件: 16'hFFF0 + TRIG_TOTAL+HEAD_LEN 个 word
      //   空闲:      16'hBC3C
      //--------------------------------
-     localparam TX_FRM_IDLE = 2'd0;
-     localparam TX_FRM_SC   = 2'd1;
-     localparam TX_FRM_EVT  = 2'd2;
-     localparam TX_FRM_ACK  = 2'd3;
+     localparam TX_FRM_IDLE  = 3'd0;
+     localparam TX_FRM_SC    = 3'd1;
+     localparam TX_FRM_EVT   = 3'd2;
+     localparam TX_FRM_ACK   = 3'd3;
+     localparam TX_FRM_SC_RD = 3'd4;
 
-     reg [1:0] tx_frm_state;
+     reg [2:0] tx_frm_state;
      reg [5:0] tx_evt_cnt;
      reg [15:0] sc_dout_cached;
 
     // 事件数据长度（word）
     localparam EVT_WORDS = TRIG_TOTAL + HEAD_LEN;
 
-    assign user_tx_data_mux       = tx_frm_data;
-    assign user_tx_data_valid_mux = tx_frm_valid;
-
     reg [15:0] tx_frm_data;
     reg        tx_frm_valid;
+
+    assign user_tx_data_mux       = tx_frm_data;
+    assign user_tx_data_valid_mux = tx_frm_valid;
 
     always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
         if (!rst_n) begin
@@ -665,10 +673,9 @@ module main_32ch (
                         tx_frm_data  <= 16'hFFF3;
                         tx_frm_valid <= 1'b1;
                     end else if (~sc_fifo_empty) begin
-                        sc_dout_cached <= sc_fifo_dout;
-                        tx_frm_state <= TX_FRM_SC;
-                        tx_frm_data  <= 16'hFFF1;
-                        tx_frm_valid <= 1'b1;
+                        // 发起一次 FIFO 读，下一拍 dout 有效（Standard FIFO）
+                        sc_fifo_rd_en <= 1'b1;
+                        tx_frm_state  <= TX_FRM_SC_RD;
                     end else if (~fifo_async_prog_empty) begin
                         // 至少一个完整事件已缓冲
                         tx_frm_state <= TX_FRM_EVT;
@@ -677,11 +684,20 @@ module main_32ch (
                         tx_evt_cnt   <= 6'd0;
                     end
                 end
-                // 慢控回复：只读出一个数据字并发送，随即回到 IDLE（不排空 FIFO）
+                // 等待 FIFO 读数据有效，锁存数据并准备发送帧头
+                TX_FRM_SC_RD: begin
+                    sc_fifo_rd_en <= 1'b0;
+                    if (slow_control_data_valid) begin
+                        sc_dout_cached <= sc_fifo_dout;
+                        tx_frm_data    <= 16'hFFF1;
+                        tx_frm_valid   <= 1'b1;
+                        tx_frm_state   <= TX_FRM_SC;
+                    end
+                end
+                // 慢控回复：发送锁存的数据字，随即回到 IDLE（不排空 FIFO）
                 TX_FRM_SC: begin
                     tx_frm_data  <= sc_dout_cached;
                     tx_frm_valid <= 1'b1;
-                    sc_fifo_rd_en <= ~sc_fifo_empty;
                     tx_frm_state <= TX_FRM_IDLE;
                 end
                 // W-packet ack: 0xFFF3 + ack marker (0xFFFF)
@@ -726,7 +742,7 @@ module main_32ch (
     wire ad9253_fco_rise;
     assign ad9253_fco_rise = (ad9253_fco_cnt_rx == 8'd0);
 
-    wire [ADC_NUM-1:0] ad9253_config_done;
+    wire ack_req_raw;
     slow_control_manager #(
         .ADC_NUM(ADC_NUM),
         .CHANNEL_NUM(CHANNEL_NUM)
@@ -743,6 +759,7 @@ module main_32ch (
         .sc_fifo_dout  (sc_fifo_dout),
         .sc_fifo_rd_en (sc_fifo_rd_en),
         .sc_fifo_empty (sc_fifo_empty),
+        .slow_control_data_valid (slow_control_data_valid),
 
         // 标志
         .slow_control_active   (slow_control_active),
@@ -794,22 +811,61 @@ module main_32ch (
         .next_state(sc_next_state)
     );
 
-    wire [5:0] sc_state;
-    wire [5:0] sc_next_state;
+    // ack_req 跨时钟域（rxoutclk -> txoutclk）：用异步 fifo_ack 代替单周期脉冲两级同步
+    wire       ack_fifo_dout;
+    wire       ack_fifo_full;
+    wire       ack_fifo_empty;
+    wire       ack_fifo_wr_rst_busy;
+    wire       ack_fifo_rd_rst_busy;
+    wire       ack_req_rd_en;
 
-    // ack_req 跨时钟域同步（rxoutclk -> txoutclk）
-    reg ack_req_r1, ack_req_r2;
-    wire ack_req;
-    always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
+    // fifo 不空且 TX 帧状态机空闲时才读出一个 ack_req（忙时不弹出，保留在 FIFO 中）
+    assign ack_req_rd_en = ~ack_fifo_empty && (tx_frm_state == TX_FRM_IDLE);
+    assign ack_req        = ack_req_rd_en;
+
+    fifo_ack u_fifo_ack (
+        .rst        (~rst_n),
+        .wr_clk     (clk_rxoutclk_bufg),
+        .rd_clk     (clk_txoutclk_bufg),
+        .din        (1'b1),
+        .wr_en      (ack_req_raw && ~ack_fifo_full && ~ack_fifo_wr_rst_busy),
+        .rd_en      (ack_req_rd_en),
+        .dout       (ack_fifo_dout),
+        .full       (ack_fifo_full),
+        .empty      (ack_fifo_empty),
+        .wr_rst_busy(ack_fifo_wr_rst_busy),
+        .rd_rst_busy(ack_fifo_rd_rst_busy)
+    );
+
+    // Slow-control RX counter (clk_rxoutclk_bufg domain):
+    // number of slow-control messages received from stage1 (one per ack_req_raw pulse)
+    reg [15:0] sc_rx_cnt;
+    reg        ack_req_raw_d;
+    always @(posedge clk_rxoutclk_bufg or negedge rst_n) begin
         if (!rst_n) begin
-            ack_req_r1 <= 1'b0;
-            ack_req_r2 <= 1'b0;
+            sc_rx_cnt     <= 16'd0;
+            ack_req_raw_d <= 1'b0;
         end else begin
-            ack_req_r1 <= ack_req_raw;
-            ack_req_r2 <= ack_req_r1;
+            ack_req_raw_d <= ack_req_raw;
+            if (ack_req_raw && !ack_req_raw_d)
+                sc_rx_cnt <= sc_rx_cnt + 16'd1;
         end
     end
-    assign ack_req = ack_req_r2;
+
+    // ACK TX counter (clk_txoutclk_bufg domain):
+    // number of W-packet ack frames (FFF3+FFFF) sent to stage1 (one per ack_req pulse)
+    reg [15:0] ack_tx_cnt;
+    reg        ack_req_d;
+    always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
+        if (!rst_n) begin
+            ack_tx_cnt <= 16'd0;
+            ack_req_d  <= 1'b0;
+        end else begin
+            ack_req_d <= ack_req;
+            if (ack_req && !ack_req_d)
+                ack_tx_cnt <= ack_tx_cnt + 16'd1;
+        end
+    end
     //--------------------------------
     // ILA debug (added for board bring-up)
     //--------------------------------
@@ -838,7 +894,9 @@ module main_32ch (
         .probe20(brd_num[7:0]),
         .probe21(slow_control_active),
         .probe22(sc_state),
-        .probe23(sc_next_state)
+        .probe23(sc_next_state),
+        .probe24(ack_req_raw),
+        .probe25(sc_rx_cnt)
     );
 
     ila_txout u_ila_txout (
@@ -865,6 +923,9 @@ module main_32ch (
         .probe19(rx_pma_rst_n),
         .probe20(gt_link_up),
         .probe21(user_tx_data_mux),
-        .probe22(user_tx_data_valid_mux)
+        .probe22(user_tx_data_valid_mux),
+        .probe23(ack_req),
+        .probe24(ack_tx_cnt),
+        .probe25(slow_control_data_valid)
     );
 endmodule

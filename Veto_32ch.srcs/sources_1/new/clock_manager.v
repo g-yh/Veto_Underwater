@@ -31,7 +31,9 @@ module clock_manager(
     output wire clk_125M,
     output wire clk_100M,
     output wire clk_20M,
-    output wire clk_gtx_125M
+    output wire clk_gtx_125M,
+
+    output wire clk_locked
     );
 
     IBUFGDS instance_ibufgds_clk_sys_200M (
@@ -107,7 +109,7 @@ module clock_manager(
         // control
         .CLKFBOUT(pll_feedback_400M),
         .CLKFBIN(pll_feedback_400M),
-        .LOCKED (),
+        .LOCKED (clk_locked),
         .PWRDWN (0),
         .RST    (0)
     );

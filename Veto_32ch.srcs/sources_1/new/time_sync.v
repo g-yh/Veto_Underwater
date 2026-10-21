@@ -5,6 +5,7 @@ module time_sync_manager (
     input wire clk_sys_400M,
     input wire clk_drp_100M,
     input wire clk_uart,
+    input wire fifo_rst_n,
 
     // gtx data
     output reg  [15:0] gt_tx_data,
@@ -38,7 +39,7 @@ module time_sync_manager (
     input  wire gt_rx_error,
     output reg  gt_pma_rst_n,
     input  wire gt_rx_rst_done,
-    output wire gt_link_up,      // link established = alignment flag stable
+    output reg  gt_link_up,      // link established = alignment flag stable
 
     // ptp working flag
     output wire ptp_working,
@@ -71,8 +72,16 @@ module time_sync_manager (
         end
     end
 
-    assign gt_link_up = gt_pma_rst_n_flag;
-
+    // link up
+    reg  [15:0] counter_link_up;
+    always @(posedge clk_rxoutclk_bufg) begin
+        if (gt_rx_error) begin
+            counter_link_up <= 0;
+        end else if (~&counter_link_up) begin
+            counter_link_up <= counter_link_up + 1;
+        end
+        gt_link_up <= (&counter_link_up) ? 1 : 0;
+    end
 
     // ## 2. time stamp alignment
     wire        ptp_data_is_k;
@@ -83,6 +92,7 @@ module time_sync_manager (
         .clk_rxoutclk_bufg(clk_rxoutclk_bufg),
         .clk_sys_400M     (clk_sys_400M),
         .clk_uart         (clk_uart),
+        .fifo_rst_n       (fifo_rst_n),
 
         // gt data
         .gt_rx_data      (gt_rx_data),
@@ -91,6 +101,7 @@ module time_sync_manager (
         .ptp_working     (ptp_working),
         .ptp_data_is_k   (ptp_data_is_k),
         .rx_data_is_ptp  (rx_data_is_ptp),
+        .gt_link_up      (gt_link_up),
 
         .timestamp_tx (timestamp_tx),
         .timestamp_rx (timestamp_rx),
@@ -124,11 +135,13 @@ module time_sync_manager (
     assign user_rx_data_valid = gt_rx_data_valid & ~rx_data_is_ptp;
 endmodule
 
+// Asynchronously assert, synchronously deassert reset in a local clock domain.
 module ptp_manager (
     input wire clk_txoutclk_bufg,
     input wire clk_rxoutclk_bufg,
     input wire clk_sys_400M,
     input wire clk_uart,
+    input wire fifo_rst_n,
 
     input wire        ptp_start,
     input wire [63:0] ptp_value,
@@ -141,6 +154,7 @@ module ptp_manager (
     output reg         ptp_working,
     output reg         ptp_data_is_k,
     output reg         rx_data_is_ptp,
+    input  wire        gt_link_up,
 
     output reg  [63:0] timestamp_tx,
     output reg  [63:0] timestamp_rx,
@@ -224,6 +238,7 @@ module ptp_manager (
     wire [63:0] tdc_phase_results_tx;
     reg  [63:0] tdc_phase_results_tx_data;
     fifo_64b_async_64b instance_fifo_tdc_phase_measure_tx (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_sys_400M),
         .rd_clk(clk_txoutclk_bufg),
         .din   (tdc_phase_results),
@@ -238,6 +253,7 @@ module ptp_manager (
     reg  [63:0] tdc_phase_results_rx_data;
     reg  [63:0] tdc_phase_results_rx_rcv;
     fifo_64b_async_64b instance_fifo_tdc_phase_measure_rx (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_sys_400M),
         .rd_clk(clk_rxoutclk_bufg),
         .din   (tdc_phase_results),
@@ -261,6 +277,7 @@ module ptp_manager (
     buffer_timestamps instance_buffer_timestamps (
         .clk_txoutclk_bufg(clk_txoutclk_bufg),
         .clk_rxoutclk_bufg(clk_rxoutclk_bufg),
+        .fifo_rst_n       (fifo_rst_n),
 
         // t2
         .timestamp_t2_data  (timestamp_t2_data),
@@ -286,6 +303,7 @@ module ptp_manager (
         .clk_txoutclk_bufg(clk_txoutclk_bufg),
         .clk_rxoutclk_bufg(clk_rxoutclk_bufg),
         .clk_uart         (clk_uart),
+        .fifo_rst_n       (fifo_rst_n),
 
         .data_tx      (data_output_tx),
         .data_tx_valid(data_output_tx_valid),
@@ -437,7 +455,7 @@ module ptp_manager (
         case (states_ptp_rx)
             // idle, wait to receive t1 or t5 or t2 t3
             0: begin
-                if (~gt_rx_data_valid) begin
+                if (~gt_rx_data_valid && gt_link_up) begin
                     if (gt_rx_data == 16'h1cf7) begin
                         // t1, slave
                         states_ptp_rx <= 1;
@@ -538,6 +556,7 @@ endmodule
 module buffer_timestamps (
     input wire clk_txoutclk_bufg,
     input wire clk_rxoutclk_bufg,
+    input wire fifo_rst_n,
 
     // t2
     input  wire [63:0] timestamp_t2_data,
@@ -558,6 +577,7 @@ module buffer_timestamps (
     reg  fifo_t2_rden;
     wire fifo_t2_empty;
     fifo_64b_async_64b instance_fifo_timestamp_t2 (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_rxoutclk_bufg),
         .rd_clk(clk_txoutclk_bufg),
         .din   (timestamp_t2_data),
@@ -577,6 +597,7 @@ module buffer_timestamps (
     reg  fifo_t3_rden;
     wire fifo_t3_empty;
     fifo_64b_async_64b instance_fifo_timestamp_t3 (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_rxoutclk_bufg),
         .rd_clk(clk_txoutclk_bufg),
         .din   (timestamp_rx),
@@ -599,6 +620,7 @@ module buffer_timestamps (
     reg  fifo_t4_rden;
     wire fifo_t4_empty;
     fifo_64b_async_64b instance_fifo_timestamp_t4 (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_txoutclk_bufg),
         .rd_clk(clk_rxoutclk_bufg),
         .din   (timestamp_tx),
@@ -621,6 +643,7 @@ module buffer_timestamp_to_uart (
     input wire clk_txoutclk_bufg,
     input wire clk_rxoutclk_bufg,
     input wire clk_uart,
+    input wire fifo_rst_n,
 
     input wire [63:0] data_tx,
     input wire        data_tx_valid,
@@ -640,6 +663,7 @@ module buffer_timestamp_to_uart (
     // tx
     wire [7:0] tx_out;
     fifo_timestamp_to_uart instance_fifo_ptp_txdata_to_uart (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_txoutclk_bufg),
         .rd_clk(clk_uart),
         .din   (data_tx),
@@ -654,6 +678,7 @@ module buffer_timestamp_to_uart (
     // rx
     wire [7:0] rx_out;
     fifo_timestamp_to_uart instance_fifo_ptp_rxdata_to_uart (
+        .rst   (~fifo_rst_n),
         .wr_clk(clk_rxoutclk_bufg),
         .rd_clk(clk_uart),
         .din   (data_rx),
@@ -670,6 +695,7 @@ module buffer_timestamp_to_uart (
     reg       fifo_uart_wren;
     fifo_uart instance_fifo_ptp_uart (
         .clk  (clk_uart),
+        .srst (~fifo_rst_n),
         .din  (fifo_uart_in),
         .wr_en(fifo_uart_wren),
         .rd_en(rd_en),

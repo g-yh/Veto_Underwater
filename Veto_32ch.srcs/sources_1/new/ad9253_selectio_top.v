@@ -36,11 +36,19 @@ module ad9253_selectio_top (
     input [63:0] bitslip_chx,
 
     input [319:0] in_delay_tap_in,
-    input         idelay_ld
+    input         idelay_ld,
+
+    // Debug observability for the four shared-DCO groups.
+    output [3:0] delay_locked_dbg,
+    output [3:0] bitslip_pulse_dbg
 );
 
     reg  [63:0] bitslip_chx_pulse;
     wire [ 3:0] ad9253_clk_div_out;
+    assign bitslip_pulse_dbg = {
+        bitslip_chx_pulse[40], bitslip_chx_pulse[32],
+        bitslip_chx_pulse[8],  bitslip_chx_pulse[0]
+    };
 
     // 使用generate语句生成所有通道的bitslip脉冲逻辑
     genvar bitslip_idx;
@@ -97,6 +105,7 @@ module ad9253_selectio_top (
 
     wire [  3:0] delay_locked;
     wire [511:0] data_in_to_device;
+    assign delay_locked_dbg = delay_locked;
 
     selectio_wiz_0 AD_1_3_Bk18 (
         .data_in_from_pins_p({

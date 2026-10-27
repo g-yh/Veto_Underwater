@@ -147,11 +147,36 @@ module main_32ch (
         .clk_locked(clk_locked)
     );
 
+    // VIO reset is asynchronous by design. Consumers use local
+    // asynchronous-assert/synchronous-release resets.
+    wire rst_200m_n;
+    wire rst_rx_n;
+    wire rst_tx_n;
+
+    reset_sync u_reset_sync_200m (
+        .clk   (clk_200M),
+        .arst_n(rst_n),
+        .rst_n (rst_200m_n)
+    );
+    reset_sync u_reset_sync_rx (
+        .clk   (clk_rxoutclk_bufg),
+        .arst_n(rst_n),
+        .rst_n (rst_rx_n)
+    );
+    reset_sync u_reset_sync_tx (
+        .clk   (clk_txoutclk_bufg),
+        .arst_n(rst_n),
+        .rst_n (rst_tx_n)
+    );
+
     //--------------------------------
     // si5345
     //--------------------------------
     // 定义Si5345硬件控制信号
     assign si5345_i2c_sel = 1'b0;
+    // Select IN0, which is driven by clk_125M through instance_obufds.
+    assign si5345_in_sel0 = 1'b0;
+    assign si5345_in_sel1 = 1'b0;
     assign si5345_oeb = 1'b0;
     assign si5345_rstb = 1'b1;
 
@@ -180,7 +205,7 @@ module main_32ch (
         .CLK_DIV(100)
     ) si5345_spi_inst (
         .clk    (clk_rxoutclk_bufg),
-        .rst_n  (rst_n),
+        .rst_n  (rst_rx_n),
         .start  (si5345_spi_start),
         .rw     (si5345_rw),
         .data_in(si5345_data_in),
@@ -222,16 +247,44 @@ module main_32ch (
 
     wire [ADC_NUM*CHANNEL_NUM*2*5-1:0] idelay_tap;
     wire                               idelay_ld;
+    wire [                     3:0] delay_locked_dbg;
+    wire [                     3:0] bitslip_pulse_dbg;
+    wire                            adc_selectio_reset_n;
+    // Do not gate the ADC front end on si5345_lolb.  The ADC DCO itself is
+    // the clock source for SelectIO, and the board's LOLB polarity/status
+    // pin has been observed low even when the ADC clock is present.
+    assign adc_selectio_reset_n = (&ad9253_config_done) && rst_n;
 
     // ADC 帧时钟：统一由 GT 接收时钟驱动
     wire adc_fco;
     assign adc_fco = clk_rxoutclk_bufg;
 
+    wire trigger_reset_n_rx;
+    reset_sync u_reset_sync_trigger_rx (
+        .clk   (adc_fco),
+        .arst_n(trig_rst_n),
+        .rst_n (trigger_reset_n_rx)
+    );
+
+    // Each ADC owns eight of the 32 data channels. A failed ADC
+    // configuration only holds its own downstream data channels in reset.
+    wire [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_reset_n;
+    genvar adc_rst_ch;
+    generate
+        for (adc_rst_ch = 0;
+             adc_rst_ch < ADC_NUM * CHANNEL_NUM;
+             adc_rst_ch = adc_rst_ch + 1) begin : gen_adc_channel_reset
+            assign adc_channel_reset_n[adc_rst_ch] =
+                trigger_reset_n_rx &&
+                ad9253_config_done[adc_rst_ch / CHANNEL_NUM];
+        end
+    endgenerate
+
     ad9253_selectio_top ad9253_selectio_top_inst (
         .spi_clk          (clk_rxoutclk_bufg),
         .selectio_ref_clk (clk_200M),
-        .rst_n    (si5345_lolb && (&ad9253_config_done) && rst_n),
-        .spi_rst_n(rst_n),
+        .rst_n(adc_selectio_reset_n),
+        .spi_rst_n(rst_rx_n),
 
         // AD9253 SPI
         .ad9253_sdio     (ad9253_sdio),
@@ -262,7 +315,10 @@ module main_32ch (
         .bitslip_chx(bitslip_chx),
 
         .in_delay_tap_in(idelay_tap),
-        .idelay_ld      (idelay_ld)
+        .idelay_ld      (idelay_ld),
+
+        .delay_locked_dbg (delay_locked_dbg),
+        .bitslip_pulse_dbg(bitslip_pulse_dbg)
     );
 
     //--------------------------------
@@ -281,7 +337,7 @@ module main_32ch (
                 .CLK_DIV(100)
             ) dac128s085_spi_inst (
                 .clk    (clk_rxoutclk_bufg),
-                .rst_n  (rst_n),
+                .rst_n  (rst_rx_n),
                 .start  (dac128s085_spi_start[dac_num]),
                 .rw     (0),
                 .data_in(dac128s085_data_in[dac_num*16+:16]),
@@ -336,8 +392,8 @@ module main_32ch (
     //     .ODIV2()
     // );
 
-    always @(posedge clk_200M or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge clk_200M) begin
+        if (!rst_200m_n) begin
             cali_cnt   <= 4'd0;
             cali_pulse <= 1'b0;
         end else begin
@@ -397,7 +453,7 @@ module main_32ch (
                 .CHANNEL_ID (rb_idx)
             ) ringbuffer_inst (
                 .clk       (adc_fco),
-                .rst_n     (si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n),
+                .rst_n     (adc_channel_reset_n[rb_idx]),
                 .din       (ad9253_data_chx[rb_idx*16+:16]),
                 .tdc_data  (tdc_raw_rise[rb_idx*11+:10]),
                 .time_cnt  (ptp_timestamp_rx[47:0]),
@@ -427,7 +483,7 @@ module main_32ch (
 
             fifo_sync fifo_sync_inst (
                 .clk(adc_fco),  // input wire clk
-                .srst(~(si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n)),  // input wire srst
+                .srst(~adc_channel_reset_n[fs_idx]),  // input wire srst
                 .din(ringbuffer_out[fs_idx*16+:16]),  // input wire [15 : 0] din
                 .wr_en(fifo_sync_wr_en[fs_idx]),  // input wire wr_en
                 .rd_en(fifo_sync_rd_en[fs_idx]),  // input wire rd_en
@@ -457,7 +513,7 @@ module main_32ch (
         .CHANNEL_NUM(CHANNEL_NUM)
     ) arbiter_32ch_inst (
         .clk(adc_fco),  // input wire clk
-        .rst_n(si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n),  // input wire rst_n
+        .rst_n(trigger_reset_n_rx),  // input wire rst_n
         .trig_total(TRIG_TOTAL + HEAD_LEN),  // input wire [15:0] trig_total
         .pre_fifo_empty(fifo_sync_prog_empty),  // input wire [3:0] fifo_empty
         .post_fifo_full(fifo_async_prog_full),  // input wire post_fifo_full
@@ -478,7 +534,7 @@ module main_32ch (
     wire        fifo_async_prog_empty;
 
     fifo_async_gt inst_fifo_async_gt (
-        .rst(~(si5345_lolb && (&ad9253_config_done) && rst_n && trig_rst_n)),
+        .rst(~trigger_reset_n_rx),
         .wr_clk(adc_fco),
         .rd_clk(clk_txoutclk_bufg),
         .din(arbiter_out),
@@ -574,7 +630,7 @@ module main_32ch (
         .clk_sys_400M       (clk_400M),
         .clk_drp_100M       (clk_100M),
         .clk_uart           (clk_200M),
-        .fifo_rst_n         (rst_n),
+        .fifo_rst_n         (rst_200m_n),
 
         // gtx data
         .gt_tx_data         (gt_tx_data),
@@ -654,8 +710,8 @@ module main_32ch (
     assign user_tx_data_mux       = tx_frm_data;
     assign user_tx_data_valid_mux = tx_frm_valid;
 
-    always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge clk_txoutclk_bufg) begin
+        if (!rst_tx_n) begin
             tx_frm_state   <= TX_FRM_IDLE;
             tx_frm_valid   <= 1'b0;
             tx_evt_cnt     <= 6'd0;
@@ -732,8 +788,8 @@ module main_32ch (
     // adc_fco 现为 clk_rxoutclk_bufg，与 slow_control_manager 同域。
     // AD9253_BIT_SLIP 用 fco_rise 计数等待对齐，改用 rxoutclk 域的周期脉冲。
     reg [ 7:0] ad9253_fco_cnt_rx;
-    always @(posedge adc_fco or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge adc_fco) begin
+        if (!trigger_reset_n_rx) begin
             ad9253_fco_cnt_rx <= 0;
         end else begin
             ad9253_fco_cnt_rx <= ad9253_fco_cnt_rx + 1'b1;
@@ -749,7 +805,7 @@ module main_32ch (
     ) u_slow_control_manager (
         .clk  (clk_rxoutclk_bufg),
         .clk_tx (clk_txoutclk_bufg),
-        .rst_n(rst_n),
+        .rst_n(rst_rx_n),
 
         // GT 慢控收发接口
         .user_rx_data       (user_rx_data),
@@ -824,7 +880,7 @@ module main_32ch (
     assign ack_req        = ack_req_rd_en;
 
     fifo_ack u_fifo_ack (
-        .rst        (~rst_n),
+        .rst        (~rst_rx_n),
         .wr_clk     (clk_rxoutclk_bufg),
         .rd_clk     (clk_txoutclk_bufg),
         .din        (1'b1),
@@ -841,8 +897,8 @@ module main_32ch (
     // number of slow-control messages received from stage1 (one per ack_req_raw pulse)
     reg [15:0] sc_rx_cnt;
     reg        ack_req_raw_d;
-    always @(posedge clk_rxoutclk_bufg or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge clk_rxoutclk_bufg) begin
+        if (!rst_rx_n) begin
             sc_rx_cnt     <= 16'd0;
             ack_req_raw_d <= 1'b0;
         end else begin
@@ -856,8 +912,8 @@ module main_32ch (
     // number of W-packet ack frames (FFF3+FFFF) sent to stage1 (one per ack_req pulse)
     reg [15:0] ack_tx_cnt;
     reg        ack_req_d;
-    always @(posedge clk_txoutclk_bufg or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge clk_txoutclk_bufg) begin
+        if (!rst_tx_n) begin
             ack_tx_cnt <= 16'd0;
             ack_req_d  <= 1'b0;
         end else begin
@@ -883,7 +939,7 @@ module main_32ch (
         .probe9 (fifo_async_wr_en),
         .probe10(fifo_async_prog_full),
         .probe11(fifo_async_full),
-        .probe12(current_ch[4:0]),
+        .probe12({bitslip_pulse_dbg, slow_control_active}),
         .probe13(ad9253_fco_rise),
         .probe14(idelay_ld),
         .probe15(si5345_lolb),
@@ -896,7 +952,14 @@ module main_32ch (
         .probe22(sc_state),
         .probe23(sc_next_state),
         .probe24(ack_req_raw),
-        .probe25(sc_rx_cnt)
+        .probe25({
+            ad9253_config_done[7:0],
+            delay_locked_dbg,
+            adc_selectio_reset_n,
+            rst_n,
+            si5345_lolb,
+            trig_rst_n
+        })
     );
 
     ila_txout u_ila_txout (
@@ -928,4 +991,23 @@ module main_32ch (
         .probe24(ack_tx_cnt),
         .probe25(slow_control_data_valid)
     );
+endmodule
+
+module reset_sync (
+    input  wire clk,
+    input  wire arst_n,
+    output reg  rst_n
+);
+
+    (* ASYNC_REG = "TRUE" *) reg sync_meta;
+
+    always @(posedge clk or negedge arst_n) begin
+        if (!arst_n) begin
+            sync_meta <= 1'b0;
+            rst_n     <= 1'b0;
+        end else begin
+            sync_meta <= 1'b1;
+            rst_n     <= sync_meta;
+        end
+    end
 endmodule

@@ -6,6 +6,28 @@ create_clock -name clk_sys_200M -period 5.0 [get_ports clk_200M_p]
 
 set_property DIFF_TERM TRUE [get_ports clk_200M_p]
 
+# VIO reset is asynchronous by design. Consumers use local reset
+# synchronizers or FIFO reset pins with internal synchronization.
+set_false_path \
+    -from [get_cells -hierarchical -filter {NAME =~ *vio_inst*Probe_out_reg*}]
+
+# GT RXRESETDONE and the PMA/align flag enter two-flop synchronizers
+# in time_sync.v.
+set_false_path \
+    -to [get_cells -hierarchical -filter {NAME =~ *gt_rx_rst_done_meta_reg*}]
+set_false_path \
+    -to [get_cells -hierarchical -filter {NAME =~ *gt_pma_rst_n_flag_meta_reg*}]
+
+# Bitslip requests are level signals synchronized to each ADC BUFR domain.
+set_false_path \
+    -to [get_cells -hierarchical -filter {NAME =~ *bitslip_sync1_reg*}]
+
+# The 32 TDCs deliberately sample asynchronous AFE/GT clocks through a
+# CARRY4 delay line. The first capture bank is a measurement stage and cannot
+# be evaluated with ordinary setup timing.
+set_false_path \
+    -to [get_cells -hierarchical -filter {NAME =~ *instance_tdl*signals_delay_temp_reg*}]
+
 
 # GT CLK
 set_property PACKAGE_PIN J8 [get_ports clk_gtx_125M_p]

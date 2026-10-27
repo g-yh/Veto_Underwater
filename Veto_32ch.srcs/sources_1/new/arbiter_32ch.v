@@ -29,7 +29,7 @@ module arbiter_32ch #(
 
     assign data_out = rst_n ? data_mux : 16'b0;
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             current_ch      <= 0;
             read_cnt        <= 0;

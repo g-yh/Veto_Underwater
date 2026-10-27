@@ -21,6 +21,11 @@ hv_control.exe
 test_data/
 *.dcp
 
+# Xilinx xvlog/xsim temporary files
+xsim.dir/
+xvlog.pb
+hs_err_pid*.dmp
+
 # Duplicate/old project copy
 Project/
 

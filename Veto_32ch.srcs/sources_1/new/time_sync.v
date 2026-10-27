@@ -51,6 +51,10 @@ module time_sync_manager (
     // ## 1. data alignment
     // pma reset to ensure the received data is valid
     reg gt_pma_rst_n_flag;
+    (* ASYNC_REG = "TRUE" *) reg gt_pma_rst_n_flag_meta;
+    (* ASYNC_REG = "TRUE" *) reg gt_pma_rst_n_flag_sync;
+    (* ASYNC_REG = "TRUE" *) reg gt_rx_rst_done_meta;
+    (* ASYNC_REG = "TRUE" *) reg gt_rx_rst_done_sync;
     always @(posedge clk_rxoutclk_bufg) begin
         if (~gt_rx_error) begin
             if (&gt_rx_data_is_comma) begin
@@ -65,8 +69,12 @@ module time_sync_manager (
 
     // if reset done, update reset, else set to high
     always @(posedge clk_drp_100M) begin
-        if (gt_rx_rst_done) begin
-            gt_pma_rst_n <= gt_pma_rst_n_flag;
+        gt_pma_rst_n_flag_meta <= gt_pma_rst_n_flag;
+        gt_pma_rst_n_flag_sync <= gt_pma_rst_n_flag_meta;
+        gt_rx_rst_done_meta    <= gt_rx_rst_done;
+        gt_rx_rst_done_sync    <= gt_rx_rst_done_meta;
+        if (gt_rx_rst_done_sync) begin
+            gt_pma_rst_n <= gt_pma_rst_n_flag_sync;
         end else begin  // a reset will keep 2 periods
             gt_pma_rst_n <= 1;
         end
@@ -227,11 +235,17 @@ module ptp_manager (
 
     // TDC results
     wire [63:0] tdc_phase_results;  // 300MHz clock
+    wire        tdc_update_tx;
+    wire        tdc_update_rx;
+    wire [23:0] counter_coarse_dbg;
     tdc_phase_measure instance_tdc_phase_measure (
         .clk              (clk_sys_400M),
         .clk_tx           (flags[0] | flags[1]),
         .clk_rx           (flags[2] | flags[3]),
-        .tdc_phase_results(tdc_phase_results)
+        .tdc_phase_results(tdc_phase_results),
+        .tdc_update_tx    (tdc_update_tx),
+        .tdc_update_rx    (tdc_update_rx),
+        .counter_coarse_dbg(counter_coarse_dbg)
     );
 
     reg  [ 3:0] counter_tdc_fifo_write;
@@ -250,6 +264,8 @@ module ptp_manager (
         .valid ()
     );
     wire [63:0] tdc_phase_results_rx;
+    wire        tdc_phase_fifo_empty;
+    wire        tdc_phase_fifo_valid;
     reg  [63:0] tdc_phase_results_rx_data;
     reg  [63:0] tdc_phase_results_rx_rcv;
     fifo_64b_async_64b instance_fifo_tdc_phase_measure_rx (
@@ -261,12 +277,21 @@ module ptp_manager (
         .rd_en (1),
         .dout  (tdc_phase_results_rx),
         .full  (),
-        .empty (),
-        .valid ()
+        .empty (tdc_phase_fifo_empty),
+        .valid (tdc_phase_fifo_valid)
     );
     always @(posedge clk_sys_400M) begin
         counter_tdc_fifo_write <= counter_tdc_fifo_write + 1;
     end
+
+    ila_tdc_phase_400m u_ila_tdc_phase_400m (
+        .clk   (clk_sys_400M),
+        .probe0(counter_coarse_dbg[23:0]),
+        .probe1(tdc_update_tx),
+        .probe2(tdc_update_rx),
+        .probe3(tdc_phase_results[63:0]),
+        .probe4(counter_tdc_fifo_write[3:0])
+    );
 
     // timestamp buffers
     wire [63:0] timestamp_t2_buffer;  // rx in, tx out
@@ -299,6 +324,19 @@ module ptp_manager (
     reg        data_output_tx_valid;
     reg [63:0] data_output_rx;
     reg        data_output_rx_valid;
+
+    ila_tdc_phase_tx u_ila_tdc_phase_tx (
+        .clk   (clk_txoutclk_bufg),
+        .probe0(states_ptp_tx[1:0]),
+        .probe1(counter_ptp_tx[3:0]),
+        .probe2(tdc_phase_results_tx[63:0]),
+        .probe3(tdc_phase_results_tx_data[63:0]),
+        .probe4(tx_data_ptp[15:0]),
+        .probe5(ptp_data_is_k),
+        .probe6(ptp_start_reg),
+        .probe7(buffer_t2_valid)
+    );
+
     buffer_timestamp_to_uart instance_buffer_timestamp_to_uart (
         .clk_txoutclk_bufg(clk_txoutclk_bufg),
         .clk_rxoutclk_bufg(clk_rxoutclk_bufg),
@@ -735,7 +773,10 @@ module tdc_phase_measure #(
     input  wire        clk,
     input  wire        clk_tx,
     input  wire        clk_rx,
-    output reg  [63:0] tdc_phase_results
+    output reg  [63:0] tdc_phase_results,
+    output wire        tdc_update_tx,
+    output wire        tdc_update_rx,
+    output wire [23:0] counter_coarse_dbg
 );
 
     reg [23:0] counter_coarse;
@@ -784,4 +825,8 @@ module tdc_phase_measure #(
             tdc_phase_results[7:0]  <= tdc_rise_rx[7:0];
         end
     end
+
+    assign tdc_update_tx = tdc_rise_tx[N_bins_bits];
+    assign tdc_update_rx = tdc_rise_rx[N_bins_bits];
+    assign counter_coarse_dbg = counter_coarse;
 endmodule

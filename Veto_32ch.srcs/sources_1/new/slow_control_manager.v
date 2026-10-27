@@ -98,7 +98,7 @@ module slow_control_manager #(
 
     // ack_req: 每次 rx_use 都拉高一个周期，main 据此发送 FFF3+FFFF ack 帧
     reg ack_req_r;
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n)
             ack_req_r <= 1'b0;
         else
@@ -106,7 +106,7 @@ module slow_control_manager #(
     end
     assign ack_req = ack_req_r;
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             brd_num    <= 8'd0;
             brd_num_set <= 1'b0;
@@ -225,7 +225,7 @@ module slow_control_manager #(
     reg [ 5:0] state_d;
     wire       wd_timeout = (wd_cnt >= TIMEOUT_CYCLES);
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             wd_cnt <= 32'd0;
             state_d <= IDLE;
@@ -238,7 +238,7 @@ module slow_control_manager #(
         end
     end
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             state <= IDLE;
         end else if (wd_timeout) begin
@@ -411,7 +411,7 @@ module slow_control_manager #(
     end
 
     // 主要控制逻辑
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             si5345_conf_bytes <= 0;
             si5345_byte_counter <= 0;

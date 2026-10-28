@@ -237,18 +237,20 @@ module ptp_manager (
     wire [63:0] tdc_phase_results;  // 300MHz clock
     wire        tdc_update_tx;
     wire        tdc_update_rx;
+    wire        tdc_phase_results_valid;
     wire [23:0] counter_coarse_dbg;
     tdc_phase_measure instance_tdc_phase_measure (
         .clk              (clk_sys_400M),
         .clk_tx           (flags[0] | flags[1]),
         .clk_rx           (flags[2] | flags[3]),
         .tdc_phase_results(tdc_phase_results),
+        .tdc_phase_results_valid(tdc_phase_results_valid),
         .tdc_update_tx    (tdc_update_tx),
         .tdc_update_rx    (tdc_update_rx),
         .counter_coarse_dbg(counter_coarse_dbg)
     );
 
-    reg  [ 3:0] counter_tdc_fifo_write;
+    reg  [ 3:0] tdc_result_write_count;
     wire [63:0] tdc_phase_results_tx;
     reg  [63:0] tdc_phase_results_tx_data;
     fifo_64b_async_64b instance_fifo_tdc_phase_measure_tx (
@@ -256,7 +258,7 @@ module ptp_manager (
         .wr_clk(clk_sys_400M),
         .rd_clk(clk_txoutclk_bufg),
         .din   (tdc_phase_results),
-        .wr_en (&counter_tdc_fifo_write),
+        .wr_en (tdc_phase_results_valid),
         .rd_en (1),
         .dout  (tdc_phase_results_tx),
         .full  (),
@@ -273,7 +275,7 @@ module ptp_manager (
         .wr_clk(clk_sys_400M),
         .rd_clk(clk_rxoutclk_bufg),
         .din   (tdc_phase_results),
-        .wr_en (&counter_tdc_fifo_write),
+        .wr_en (tdc_phase_results_valid),
         .rd_en (1),
         .dout  (tdc_phase_results_rx),
         .full  (),
@@ -281,7 +283,9 @@ module ptp_manager (
         .valid (tdc_phase_fifo_valid)
     );
     always @(posedge clk_sys_400M) begin
-        counter_tdc_fifo_write <= counter_tdc_fifo_write + 1;
+        if (tdc_phase_results_valid) begin
+            tdc_result_write_count <= tdc_result_write_count + 1;
+        end
     end
 
     ila_tdc_phase_400m u_ila_tdc_phase_400m (
@@ -290,7 +294,7 @@ module ptp_manager (
         .probe1(tdc_update_tx),
         .probe2(tdc_update_rx),
         .probe3(tdc_phase_results[63:0]),
-        .probe4(counter_tdc_fifo_write[3:0])
+        .probe4(tdc_result_write_count[3:0])
     );
 
     // timestamp buffers
@@ -774,6 +778,7 @@ module tdc_phase_measure #(
     input  wire        clk_tx,
     input  wire        clk_rx,
     output reg  [63:0] tdc_phase_results,
+    output reg         tdc_phase_results_valid,
     output wire        tdc_update_tx,
     output wire        tdc_update_rx,
     output wire [23:0] counter_coarse_dbg
@@ -814,19 +819,59 @@ module tdc_phase_measure #(
         .tdc_raw_fall(tdc_fall_rx)
     );
 
-    // output
-    always @(posedge clk) begin
-        if (tdc_rise_tx[N_bins_bits]) begin
-            tdc_phase_results[63:40] <= counter_coarse;
-            tdc_phase_results[39:32] <= tdc_rise_tx[7:0];
-        end
-        if (tdc_rise_rx[N_bins_bits]) begin
-            tdc_phase_results[31:8] <= counter_coarse;
-            tdc_phase_results[7:0]  <= tdc_rise_rx[7:0];
-        end
-    end
-
     assign tdc_update_tx = tdc_rise_tx[N_bins_bits];
     assign tdc_update_rx = tdc_rise_rx[N_bins_bits];
     assign counter_coarse_dbg = counter_coarse;
+
+    // Latch each half independently, but publish a complete TX/RX pair as
+    // one atomic 64-bit word to the CDC FIFO.  Writing the accumulator on
+    // every clk_sys_400M cycle can capture the new TX half together with the
+    // previous RX half, which appears as a plausible but wrong coarse phase.
+    reg [23:0] tdc_tx_coarse_latched;
+    reg [ 7:0] tdc_tx_phase_latched;
+    reg [23:0] tdc_rx_coarse_latched;
+    reg [ 7:0] tdc_rx_phase_latched;
+    reg        tdc_tx_pending;
+    reg        tdc_rx_pending;
+
+    wire [23:0] tdc_tx_coarse_next;
+    wire [ 7:0] tdc_tx_phase_next;
+    wire [23:0] tdc_rx_coarse_next;
+    wire [ 7:0] tdc_rx_phase_next;
+    wire        tdc_pair_ready;
+
+    assign tdc_tx_coarse_next = tdc_update_tx ? counter_coarse : tdc_tx_coarse_latched;
+    assign tdc_tx_phase_next  = tdc_update_tx ? tdc_rise_tx[7:0] : tdc_tx_phase_latched;
+    assign tdc_rx_coarse_next = tdc_update_rx ? counter_coarse : tdc_rx_coarse_latched;
+    assign tdc_rx_phase_next  = tdc_update_rx ? tdc_rise_rx[7:0] : tdc_rx_phase_latched;
+    assign tdc_pair_ready     = (tdc_tx_pending | tdc_update_tx) &
+                                (tdc_rx_pending | tdc_update_rx);
+
+    always @(posedge clk) begin
+        tdc_phase_results_valid <= 1'b0;
+
+        if (tdc_update_tx) begin
+            tdc_tx_coarse_latched <= counter_coarse;
+            tdc_tx_phase_latched  <= tdc_rise_tx[7:0];
+            tdc_tx_pending        <= 1'b1;
+        end
+
+        if (tdc_update_rx) begin
+            tdc_rx_coarse_latched <= counter_coarse;
+            tdc_rx_phase_latched  <= tdc_rise_rx[7:0];
+            tdc_rx_pending        <= 1'b1;
+        end
+
+        if (tdc_pair_ready) begin
+            tdc_phase_results <= {
+                tdc_tx_coarse_next,
+                tdc_tx_phase_next,
+                tdc_rx_coarse_next,
+                tdc_rx_phase_next
+            };
+            tdc_phase_results_valid <= 1'b1;
+            tdc_tx_pending          <= 1'b0;
+            tdc_rx_pending          <= 1'b0;
+        end
+    end
 endmodule

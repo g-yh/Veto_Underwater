@@ -4,6 +4,7 @@ module ad9253_selectio_top (
     input spi_clk,
     input selectio_ref_clk,
     input rst_n,
+    input [7:0] adc_reset_n,
     input spi_rst_n,
 
     // AD9253 SPI
@@ -307,7 +308,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc1 (
-        .rst        (~rst_n),                   // input wire rst
+        .rst        (~adc_reset_n[0]),          // input wire rst
         .wr_clk     (ad9253_clk_div_out[0]),    // input wire wr_clk
         .rd_clk     (adc_fco),                  // input wire rd_clk
         .din        (ad9253_data_async[63:0]),  // input wire [63 : 0] din
@@ -404,7 +405,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc3 (
-        .rst        (~rst_n),                      // input wire rst
+        .rst        (~adc_reset_n[2]),             // input wire rst
         .wr_clk     (ad9253_clk_div_out[0]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[191:128]),  // input wire [63 : 0] din
@@ -501,7 +502,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc2 (
-        .rst        (~rst_n),                     // input wire rst
+        .rst        (~adc_reset_n[1]),            // input wire rst
         .wr_clk     (ad9253_clk_div_out[1]),      // input wire wr_clk
         .rd_clk     (adc_fco),                    // input wire rd_clk
         .din        (ad9253_data_async[127:64]),  // input wire [63 : 0] din
@@ -598,7 +599,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc4 (
-        .rst        (~rst_n),                      // input wire rst
+        .rst        (~adc_reset_n[3]),             // input wire rst
         .wr_clk     (ad9253_clk_div_out[1]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[255:192]),  // input wire [63 : 0] din
@@ -695,7 +696,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc5 (
-        .rst        (~rst_n),                      // input wire rst
+        .rst        (~adc_reset_n[4]),             // input wire rst
         .wr_clk     (ad9253_clk_div_out[2]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[319:256]),  // input wire [63 : 0] din
@@ -792,7 +793,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc7 (
-        .rst        (~rst_n),                      // input wire rst
+        .rst        (~adc_reset_n[6]),             // input wire rst
         .wr_clk     (ad9253_clk_div_out[2]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[447:384]),  // input wire [63 : 0] din
@@ -889,7 +890,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc6 (
-        .rst        (~rst_n),                      // input wire rst
+        .rst        (~adc_reset_n[5]),             // input wire rst
         .wr_clk     (ad9253_clk_div_out[3]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[383:320]),  // input wire [63 : 0] din
@@ -986,7 +987,7 @@ module ad9253_selectio_top (
     };
 
     async_fifo aync_fifo_adc8 (
-        .rst        (~rst_n),                      // input wire rst
+        .rst        (~adc_reset_n[7]),             // input wire rst
         .wr_clk     (ad9253_clk_div_out[3]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[511:448]),  // input wire [63 : 0] din

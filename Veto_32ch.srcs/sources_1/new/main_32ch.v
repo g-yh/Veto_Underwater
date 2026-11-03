@@ -101,7 +101,6 @@ module main_32ch (
     assign uart_tx = 1'b1;
 
     wire rst_n;
-    wire rst_n_used;
     wire trig_rst_n;
     wire clk_200M;
     wire clk_txoutclk_bufg;
@@ -111,14 +110,6 @@ module main_32ch (
     wire [5:0] sc_next_state;
     wire [ADC_NUM*CHANNEL_NUM-1:0] fifo_sync_prog_full;
     wire ack_req;
-    (* dont_touch="true" *) vio_0 vio_inst (
-        .clk       (clk_200M),            // input wire clk
-        .probe_out0(rst_n),
-        .probe_out1(trig_rst_n)
-    );
-
-    // assign rst_n = clk_locked;
-
     //--------------------------------
     // clock manager
     //--------------------------------
@@ -147,8 +138,15 @@ module main_32ch (
         .clk_locked(clk_locked)
     );
 
-    // VIO reset is asynchronous by design. Consumers use local
-    // asynchronous-assert/synchronous-release resets.
+    // VIO reset controls: probe0 resets all logic; probe1 resets only the ADC
+    // transfer path (ring buffers, FIFOs, arbiter and event TX).
+    (* dont_touch = "true" *) vio_0 vio_inst (
+        .clk       (clk_200M),
+        .probe_out0(rst_n),
+        .probe_out1(trig_rst_n)
+    );
+
+    // Consumers use local asynchronous-assert/synchronous-release resets.
     wire rst_200m_n;
     wire rst_rx_n;
     wire rst_tx_n;
@@ -250,10 +248,8 @@ module main_32ch (
     wire [                     3:0] delay_locked_dbg;
     wire [                     3:0] bitslip_pulse_dbg;
     wire                            adc_selectio_reset_n;
-    // Do not gate the ADC front end on si5345_lolb.  The ADC DCO itself is
-    // the clock source for SelectIO, and the board's LOLB polarity/status
-    // pin has been observed low even when the ADC clock is present.
-    assign adc_selectio_reset_n = (&ad9253_config_done) && rst_n;
+    // Global VIO reset covers the complete SelectIO/ADC front end.
+    assign adc_selectio_reset_n = rst_n;
 
     // ADC 帧时钟：统一由 GT 接收时钟驱动
     wire adc_fco;
@@ -262,21 +258,65 @@ module main_32ch (
     wire trigger_reset_n_rx;
     reset_sync u_reset_sync_trigger_rx (
         .clk   (adc_fco),
-        .arst_n(trig_rst_n),
+        .arst_n(rst_n && trig_rst_n),
         .rst_n (trigger_reset_n_rx)
     );
 
-    // Each ADC owns eight of the 32 data channels. A failed ADC
-    // configuration only holds its own downstream data channels in reset.
+    // Per-channel software enable mask (ADC0 ch0 is channel index 0).
+    wire [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_enable_rx;
+    wire adc_stream_data_reset_n = trigger_reset_n_rx;
+    wire adc_global_data_reset_n = trigger_reset_n_rx;
+
+    wire [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_data_ready_n;
+    genvar adc_sw_rst;
+    generate
+        for (adc_sw_rst = 0;
+             adc_sw_rst < ADC_NUM * CHANNEL_NUM;
+             adc_sw_rst = adc_sw_rst + 1) begin : gen_adc_software_reset
+            assign adc_channel_data_ready_n[adc_sw_rst] =
+                adc_channel_enable_rx[adc_sw_rst];
+        end
+    endgenerate
+
+    // Synchronize each ADC's configuration status into the ADC frame-clock
+    // domain. This reset only affects that ADC's FIFO and downstream data.
+    wire [ADC_NUM-1:0] adc_config_reset_n;
+    genvar adc_cfg_rst;
+    generate
+        for (adc_cfg_rst = 0; adc_cfg_rst < ADC_NUM; adc_cfg_rst = adc_cfg_rst + 1) begin : gen_adc_config_reset
+            reset_sync u_reset_sync_adc_config (
+                .clk   (adc_fco),
+                .arst_n(rst_n && ad9253_config_done[adc_cfg_rst]),
+                .rst_n (adc_config_reset_n[adc_cfg_rst])
+            );
+        end
+    endgenerate
+
+    // Each ADC owns four of the 32 data channels.
     wire [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_reset_n;
+    wire [ADC_NUM-1:0] adc_selectio_fifo_reset_n;
     genvar adc_rst_ch;
     generate
         for (adc_rst_ch = 0;
              adc_rst_ch < ADC_NUM * CHANNEL_NUM;
              adc_rst_ch = adc_rst_ch + 1) begin : gen_adc_channel_reset
             assign adc_channel_reset_n[adc_rst_ch] =
-                trigger_reset_n_rx &&
-                ad9253_config_done[adc_rst_ch / CHANNEL_NUM];
+                adc_stream_data_reset_n &&
+                adc_channel_data_ready_n[adc_rst_ch] &&
+                adc_config_reset_n[adc_rst_ch / CHANNEL_NUM];
+        end
+    endgenerate
+
+    genvar adc_selio_rst;
+    generate
+        for (adc_selio_rst = 0; adc_selio_rst < ADC_NUM;
+             adc_selio_rst = adc_selio_rst + 1) begin : gen_adc_selectio_reset
+            // Channel enable belongs to acquisition/event gating. Keep the
+            // SelectIO FIFO alive so F4/F8 bitslip diagnostics still work for
+            // ADC groups that are temporarily masked from event readout.
+            assign adc_selectio_fifo_reset_n[adc_selio_rst] =
+                adc_stream_data_reset_n &&
+                adc_config_reset_n[adc_selio_rst];
         end
     endgenerate
 
@@ -284,6 +324,7 @@ module main_32ch (
         .spi_clk          (clk_rxoutclk_bufg),
         .selectio_ref_clk (clk_200M),
         .rst_n(adc_selectio_reset_n),
+        .adc_reset_n(adc_selectio_fifo_reset_n),
         .spi_rst_n(rst_rx_n),
 
         // AD9253 SPI
@@ -442,7 +483,10 @@ module main_32ch (
     generate
         for (rb_idx = 0; rb_idx < ADC_NUM * CHANNEL_NUM; rb_idx = rb_idx + 1) begin : ringbuffer_gen
 
-            assign ringbuffer_trig[rb_idx] = tdc_raw_rise[11*rb_idx+10] && !fifo_sync_prog_full[rb_idx];
+            assign ringbuffer_trig[rb_idx] =
+                tdc_raw_rise[11*rb_idx+10] &&
+                adc_channel_data_ready_n[rb_idx] &&
+                !fifo_sync_prog_full[rb_idx];
 
             ringbuffer #(
                 .DATA_WIDTH (16),
@@ -487,7 +531,9 @@ module main_32ch (
                 .din(ringbuffer_out[fs_idx*16+:16]),  // input wire [15 : 0] din
                 .wr_en(fifo_sync_wr_en[fs_idx]),  // input wire wr_en
                 .rd_en(fifo_sync_rd_en[fs_idx]),  // input wire rd_en
-                .prog_empty_thresh(TRIG_TOTAL + HEAD_LEN),  // input wire [10 : 0] prog_empty_thresh
+                // Xilinx prog_empty asserts when count <= threshold.
+                // Use N-1 so one complete N-word event deasserts it.
+                .prog_empty_thresh(TRIG_TOTAL + HEAD_LEN - 1),  // input wire [10 : 0] prog_empty_thresh
                 .prog_full_thresh(12'd2048 - (TRIG_TOTAL + HEAD_LEN)),  // input wire [10 : 0] prog_full_thresh
                 .dout(fifo_sync_dout[fs_idx*16+:16]),  // output wire [15 : 0] dout
                 .full(fifo_sync_full[fs_idx]),  // output wire full
@@ -513,7 +559,7 @@ module main_32ch (
         .CHANNEL_NUM(CHANNEL_NUM)
     ) arbiter_32ch_inst (
         .clk(adc_fco),  // input wire clk
-        .rst_n(trigger_reset_n_rx),  // input wire rst_n
+        .rst_n(adc_global_data_reset_n),  // input wire rst_n
         .trig_total(TRIG_TOTAL + HEAD_LEN),  // input wire [15:0] trig_total
         .pre_fifo_empty(fifo_sync_prog_empty),  // input wire [3:0] fifo_empty
         .post_fifo_full(fifo_async_prog_full),  // input wire post_fifo_full
@@ -534,13 +580,14 @@ module main_32ch (
     wire        fifo_async_prog_empty;
 
     fifo_async_gt inst_fifo_async_gt (
-        .rst(~trigger_reset_n_rx),
+        .rst(~adc_global_data_reset_n),
         .wr_clk(adc_fco),
         .rd_clk(clk_txoutclk_bufg),
         .din(arbiter_out),
         .wr_en(fifo_async_wr_en),
         .rd_en(fifo_async_rd_en),
-        .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN)),
+        // One complete event must make prog_empty deassert immediately.
+        .prog_empty_thresh((TRIG_TOTAL + HEAD_LEN - 1)),
         .prog_full_thresh(12'd2048 - (TRIG_TOTAL + HEAD_LEN)),
         .dout(fifo_async_data_out),
         .full(fifo_async_full),
@@ -697,9 +744,22 @@ module main_32ch (
      localparam TX_FRM_ACK   = 3'd3;
      localparam TX_FRM_SC_RD = 3'd4;
 
-     reg [2:0] tx_frm_state;
-     reg [5:0] tx_evt_cnt;
-     reg [15:0] sc_dout_cached;
+    reg [2:0] tx_frm_state;
+    reg [5:0] tx_evt_cnt;
+    reg [15:0] sc_dout_cached;
+
+    // Level CDC from the ADC trigger reset to the GT transmit clock.
+    (* ASYNC_REG = "TRUE" *) reg [1:0] adc_trigger_ready_tx_sync;
+    always @(posedge clk_txoutclk_bufg) begin
+        if (!rst_tx_n) begin
+            adc_trigger_ready_tx_sync <= 2'b00;
+        end else begin
+            adc_trigger_ready_tx_sync <=
+                {adc_trigger_ready_tx_sync[0],
+                 trigger_reset_n_rx};
+        end
+    end
+    wire adc_trigger_ready_tx = adc_trigger_ready_tx_sync[1];
 
     // 事件数据长度（word）
     localparam EVT_WORDS = TRIG_TOTAL + HEAD_LEN;
@@ -717,6 +777,14 @@ module main_32ch (
             tx_evt_cnt     <= 6'd0;
             fifo_async_rd_en <= 1'b0;
             sc_fifo_rd_en    <= 1'b0;
+        end else if ((tx_frm_state == TX_FRM_EVT) &&
+                     !adc_trigger_ready_tx) begin
+            // Abort a partially transmitted event on STOP. ACK and slow
+            // control responses remain available while ADC streaming is off.
+            tx_frm_state     <= TX_FRM_IDLE;
+            tx_frm_valid     <= 1'b0;
+            tx_evt_cnt       <= 6'd0;
+            fifo_async_rd_en <= 1'b0;
         end else begin
             case (tx_frm_state)
                 // 空闲：慢控优先，其次事件
@@ -732,12 +800,19 @@ module main_32ch (
                         // 发起一次 FIFO 读，下一拍 dout 有效（Standard FIFO）
                         sc_fifo_rd_en <= 1'b1;
                         tx_frm_state  <= TX_FRM_SC_RD;
-                    end else if (~fifo_async_prog_empty) begin
+                    end else if (adc_trigger_ready_tx &&
+                                 ~fifo_async_prog_empty) begin
                         // 至少一个完整事件已缓冲
+                        // fifo_async_gt is FWFT: DOUT already contains the
+                        // first event word whenever FIFO is not empty.
                         tx_frm_state <= TX_FRM_EVT;
                         tx_frm_data  <= 16'hFFF0;
                         tx_frm_valid <= 1'b1;
                         tx_evt_cnt   <= 6'd0;
+                        // Prime the FWFT FIFO during the header cycle.
+                        // The next tx_frm_data register captures this first
+                        // body word, while the FIFO advances to the second.
+                        fifo_async_rd_en <= 1'b1;
                     end
                 end
                 // 等待 FIFO 读数据有效，锁存数据并准备发送帧头
@@ -768,6 +843,9 @@ module main_32ch (
                     tx_frm_valid     <= 1'b1;
                     fifo_async_rd_en <= 1'b1;
                     if (tx_evt_cnt == EVT_WORDS[5:0] - 6'd1) begin
+                        // The final body word was presented this cycle; clear
+                        // rd_en so the first word of the next event remains.
+                        fifo_async_rd_en <= 1'b0;
                         tx_frm_state <= TX_FRM_IDLE;
                         tx_evt_cnt   <= 6'd0;
                     end else begin
@@ -864,7 +942,8 @@ module main_32ch (
         .cali_flag  (cali_flag),
 
         .state(sc_state),
-        .next_state(sc_next_state)
+        .next_state(sc_next_state),
+        .adc_channel_enable(adc_channel_enable_rx)
     );
 
     // ack_req 跨时钟域（rxoutclk -> txoutclk）：用异步 fifo_ack 代替单周期脉冲两级同步
@@ -925,6 +1004,37 @@ module main_32ch (
     //--------------------------------
     // ILA debug (added for board bring-up)
     //--------------------------------
+    // Dedicated ADC0 channel-A observation ILA.
+    // probe0: {5'b0, comparator[0], tap[4], adc0_config_done,
+    //          adc0_cha_data[15:0]}
+    // probe1: comparator/TDC trigger
+    // probe2: bitslip pulse
+    // probe3: all four ADC0 channel words
+    // probe4: IDELAY tap[3:0]
+    ila_adc_data u_ila_adc_data (
+        .clk (adc_fco),
+        .probe0 (ad9253_data_chx[15:0]),
+        .probe1 (tdc_raw_rise[10:0]),
+        .probe2 (max40026_ch),
+        .probe3 (ringbuffer_trig)
+    );
+
+    // All ILA status probes are registered in the ILA's RXOUTCLK domain.
+    (* ASYNC_REG = "TRUE" *) reg [3:0] delay_locked_rx_meta;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] delay_locked_rx_sync;
+    (* ASYNC_REG = "TRUE" *) reg adc_selectio_reset_n_meta;
+    (* ASYNC_REG = "TRUE" *) reg adc_selectio_reset_n_rx;
+    (* ASYNC_REG = "TRUE" *) reg si5345_lolb_meta;
+    (* ASYNC_REG = "TRUE" *) reg si5345_lolb_rx;
+    always @(posedge clk_rxoutclk_bufg) begin
+        delay_locked_rx_meta <= delay_locked_dbg;
+        delay_locked_rx_sync <= delay_locked_rx_meta;
+        adc_selectio_reset_n_meta <= adc_selectio_reset_n;
+        adc_selectio_reset_n_rx   <= adc_selectio_reset_n_meta;
+        si5345_lolb_meta <= si5345_lolb;
+        si5345_lolb_rx   <= si5345_lolb_meta;
+    end
+
     ila_rxout u_ila_rxout (
         .clk (clk_rxoutclk_bufg),
         .probe0 (ad9253_data_chx[15:0]),
@@ -942,7 +1052,7 @@ module main_32ch (
         .probe12({bitslip_pulse_dbg, slow_control_active}),
         .probe13(ad9253_fco_rise),
         .probe14(idelay_ld),
-        .probe15(si5345_lolb),
+        .probe15(si5345_lolb_rx),
         .probe16(bitslip_chx[1:0]),
         .probe17(ad9253_config_done[7:0]),
         .probe18(user_rx_data[15:0]),
@@ -954,11 +1064,11 @@ module main_32ch (
         .probe24(ack_req_raw),
         .probe25({
             ad9253_config_done[7:0],
-            delay_locked_dbg,
-            adc_selectio_reset_n,
-            rst_n,
-            si5345_lolb,
-            trig_rst_n
+            delay_locked_rx_sync,
+            adc_selectio_reset_n_rx,
+            rst_rx_n,
+            si5345_lolb_rx,
+            trigger_reset_n_rx
         })
     );
 
@@ -977,14 +1087,16 @@ module main_32ch (
         .probe10(sc_fifo_rd_en),
         .probe11(gt_tx_data[15:0]),
         .probe12(gt_tx_data_valid),
-        .probe13(gt_rx_data[15:0]),
-        .probe14(gt_rx_data_valid),
-        .probe15(rx_data_is_comma[1:0]),
-        .probe16(gtx_cpll_is_lock),
-        .probe17(rx_reset_done),
-        .probe18(gtx_rx_error),
-        .probe19(rx_pma_rst_n),
-        .probe20(gt_link_up),
+        // RX-domain signals are observed by u_ila_rxout. Do not route them
+        // directly into the TXOUTCLK-domain ILA.
+        .probe13(16'h0000),
+        .probe14(1'b0),
+        .probe15(2'b00),
+        .probe16(1'b0),
+        .probe17(1'b0),
+        .probe18(1'b0),
+        .probe19(1'b0),
+        .probe20(1'b0),
         .probe21(user_tx_data_mux),
         .probe22(user_tx_data_valid_mux),
         .probe23(ack_req),
@@ -996,7 +1108,7 @@ endmodule
 module reset_sync (
     input  wire clk,
     input  wire arst_n,
-    output reg  rst_n
+    (* ASYNC_REG = "TRUE" *) output reg rst_n
 );
 
     (* ASYNC_REG = "TRUE" *) reg sync_meta;

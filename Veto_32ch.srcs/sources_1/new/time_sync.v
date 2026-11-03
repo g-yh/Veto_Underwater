@@ -288,15 +288,6 @@ module ptp_manager (
         end
     end
 
-    ila_tdc_phase_400m u_ila_tdc_phase_400m (
-        .clk   (clk_sys_400M),
-        .probe0(counter_coarse_dbg[23:0]),
-        .probe1(tdc_update_tx),
-        .probe2(tdc_update_rx),
-        .probe3(tdc_phase_results[63:0]),
-        .probe4(tdc_result_write_count[3:0])
-    );
-
     // timestamp buffers
     wire [63:0] timestamp_t2_buffer;  // rx in, tx out
     wire        buffer_t2_valid;
@@ -788,6 +779,8 @@ module tdc_phase_measure #(
     always @(posedge clk) begin
         counter_coarse <= counter_coarse + 1;
     end
+    wire [23:0] counter_coarse_capture =
+        (N_carry4 == 64) ? (counter_coarse - 24'd1) : counter_coarse;
 
     // system clock measure tx clock
     wire [N_bins_bits:0] tdc_rise_tx;
@@ -840,9 +833,9 @@ module tdc_phase_measure #(
     wire [ 7:0] tdc_rx_phase_next;
     wire        tdc_pair_ready;
 
-    assign tdc_tx_coarse_next = tdc_update_tx ? counter_coarse : tdc_tx_coarse_latched;
+    assign tdc_tx_coarse_next = tdc_update_tx ? counter_coarse_capture : tdc_tx_coarse_latched;
     assign tdc_tx_phase_next  = tdc_update_tx ? tdc_rise_tx[7:0] : tdc_tx_phase_latched;
-    assign tdc_rx_coarse_next = tdc_update_rx ? counter_coarse : tdc_rx_coarse_latched;
+    assign tdc_rx_coarse_next = tdc_update_rx ? counter_coarse_capture : tdc_rx_coarse_latched;
     assign tdc_rx_phase_next  = tdc_update_rx ? tdc_rise_rx[7:0] : tdc_rx_phase_latched;
     assign tdc_pair_ready     = (tdc_tx_pending | tdc_update_tx) &
                                 (tdc_rx_pending | tdc_update_rx);
@@ -851,13 +844,13 @@ module tdc_phase_measure #(
         tdc_phase_results_valid <= 1'b0;
 
         if (tdc_update_tx) begin
-            tdc_tx_coarse_latched <= counter_coarse;
+            tdc_tx_coarse_latched <= counter_coarse_capture;
             tdc_tx_phase_latched  <= tdc_rise_tx[7:0];
             tdc_tx_pending        <= 1'b1;
         end
 
         if (tdc_update_rx) begin
-            tdc_rx_coarse_latched <= counter_coarse;
+            tdc_rx_coarse_latched <= counter_coarse_capture;
             tdc_rx_phase_latched  <= tdc_rise_rx[7:0];
             tdc_rx_pending        <= 1'b1;
         end

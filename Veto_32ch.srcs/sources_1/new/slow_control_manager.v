@@ -63,10 +63,10 @@ module slow_control_manager #(
     // Bit slip控制
     input  wire                               ad9253_fco_rise,
     input  wire [ADC_NUM*CHANNEL_NUM*2*8-1:0] ad9253_data_chx,
-    output reg  [    ADC_NUM*CHANNEL_NUM*2:0] bitslip_chx,
+    output reg  [ADC_NUM*CHANNEL_NUM*2-1:0] bitslip_chx,
 
     // idelay
-    output reg [ADC_NUM*CHANNEL_NUM*2*5-1:0] idelay_tap,
+    output wire [ADC_NUM*CHANNEL_NUM*2*5-1:0] idelay_tap,
     output reg                               idelay_ld,
 
     // tdc
@@ -75,7 +75,11 @@ module slow_control_manager #(
     output reg  [   ADC_NUM*CHANNEL_NUM - 1:0] cali_flag,
 
     output reg  [ 5:0] state,
-    output reg  [ 5:0] next_state
+    output reg  [ 5:0] next_state,
+
+    // Per-acquisition-channel enable mask.  Bit N controls ADC N/4 channel N%4.
+    // A cleared bit holds only that channel's trigger/data path in reset.
+    output reg [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_enable
 );
 
     //--------------------------------
@@ -83,18 +87,53 @@ module slow_control_manager #(
     // 与 clk 同步（time_sync_manager 输出，位于 rxoutclk 域），无需同步。
     //--------------------------------
     wire rx_valid_pulse = user_rx_data_valid;    // 同步域内的有效脉冲
-    wire [7:0] rx_addr = user_rx_data[15:8];
-    wire [7:0] rx_data = user_rx_data[7:0];
+    // Register the GT receive word once before it fans out into the command
+    // decoder, state machine, and 64-channel IDELAY write logic.
+    reg [15:0] rx_word_r;
+    reg        rx_word_valid_r;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            rx_word_r       <= 16'd0;
+            rx_word_valid_r <= 1'b0;
+        end else begin
+            rx_word_r       <= user_rx_data;
+            rx_word_valid_r <= user_rx_data_valid;
+        end
+    end
+
+    wire [7:0] rx_addr = rx_word_r[15:8];
+    wire [7:0] rx_data = rx_word_r[7:0];
 
     // brd_num 锁存 + 板号匹配
     reg brd_num_set;
     wire rx_addr_valid = (rx_addr >= 8'd1) && (rx_addr <= 8'd8);
-    wire rx_is_command = (rx_data >= 8'hF0) && (rx_data <= 8'hF7);
+    wire rx_is_command = (rx_data >= 8'hF0) && (rx_data <= 8'hF8);
+    wire rx_adc_channel_cmd_addr =
+        (rx_addr >= 8'h90) && (rx_addr <= 8'h9F);
+    wire rx_adc_channel_cmd =
+        rx_word_valid_r && (state == 6'd0) &&
+        rx_adc_channel_cmd_addr &&
+        (rx_data < ADC_NUM*CHANNEL_NUM);
     // 如果复位后先收到残留数据，允许在 IDLE 遇到新的合法命令时重新锁定板号。
     wire addr_match = !brd_num_set ||
                       (rx_addr == brd_num) ||
                       ((state == 6'd0) && rx_addr_valid && rx_is_command);
-    wire rx_use = rx_valid_pulse & addr_match;
+    wire rx_use =
+        rx_word_valid_r &&
+        (addr_match || rx_adc_channel_cmd_addr);
+
+    reg rx_adc_channel_cmd_d;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            adc_channel_enable       <= {ADC_NUM*CHANNEL_NUM{1'b1}};
+            rx_adc_channel_cmd_d     <= 1'b0;
+        end else begin
+            rx_adc_channel_cmd_d   <= rx_adc_channel_cmd;
+            if (rx_adc_channel_cmd && !rx_adc_channel_cmd_d) begin
+                adc_channel_enable[rx_data[4:0]] <= rx_addr[0];
+            end
+        end
+    end
 
     // ack_req: 每次 rx_use 都拉高一个周期，main 据此发送 FFF3+FFFF ack 帧
     reg ack_req_r;
@@ -110,7 +149,7 @@ module slow_control_manager #(
         if (!rst_n) begin
             brd_num    <= 8'd0;
             brd_num_set <= 1'b0;
-        end else if (rx_valid_pulse && rx_addr_valid &&
+        end else if (rx_word_valid_r && rx_addr_valid &&
                      (!brd_num_set ||
                       ((state == 6'd0) && rx_is_command))) begin
             brd_num     <= rx_addr;
@@ -156,6 +195,8 @@ module slow_control_manager #(
     localparam GET_TDC_NUM = 6'd24;
     localparam TDC_CALI = 6'd25;
     localparam TDC_CALI_SEND_DATA = 6'd26;
+    localparam GET_AD9253_TEST_WORD_NUM = 6'd27;
+    localparam READ_AD9253_TEST_WORD = 6'd28;
 
     // reg  [ 5:0] state;
     // reg  [ 5:0] next_state;
@@ -186,6 +227,7 @@ module slow_control_manager #(
     reg  [ 3:0] ad9253_fco_cnt;
     reg  [ 3:0] ad9253_num;
     reg  [ 7:0] ad9253_bit_slip_num;
+    reg  [ 7:0] ad9253_test_word_num;
     reg  [ 7:0] ad9253_idelay_num;
     reg  [31:0] adc_wait_cnt;
     wire [ 1:0] ad9253_fco_sel;
@@ -213,6 +255,29 @@ module slow_control_manager #(
     reg [ 3:0] idelay_time_cnt;
     reg        idelay_done;
     reg        idelay_flag;
+    reg [ 4:0] idelay_tap_bank [0:ADC_NUM*CHANNEL_NUM*2-1];
+    reg [ 5:0] idelay_write_index;
+    reg [ 4:0] idelay_write_data;
+    reg        idelay_write_req;
+
+    genvar idelay_tap_idx;
+    generate
+        for (idelay_tap_idx = 0;
+             idelay_tap_idx < ADC_NUM*CHANNEL_NUM*2;
+             idelay_tap_idx = idelay_tap_idx + 1) begin : gen_idelay_tap_bank
+            always @(posedge clk) begin
+                if (!rst_n) begin
+                    idelay_tap_bank[idelay_tap_idx] <= 5'd0;
+                end else if (idelay_write_req &&
+                             (idelay_write_index == idelay_tap_idx)) begin
+                    idelay_tap_bank[idelay_tap_idx] <= idelay_write_data;
+                end
+            end
+
+            assign idelay_tap[idelay_tap_idx*5 +: 5] =
+                idelay_tap_bank[idelay_tap_idx];
+        end
+    endgenerate
 
     reg        tdc_cali_done;
     reg [ 9:0] tdc_bin;
@@ -265,6 +330,8 @@ module slow_control_manager #(
                     next_state = GET_AD9253_IDELAY_NUM;
                 else if (rx_use && rx_data == 8'hF6) next_state = GET_DAC128S085_NUM;
                 else if (rx_use && rx_data == 8'hF7) next_state = GET_TDC_NUM;
+                else if (rx_use && rx_data == 8'hF8)
+                    next_state = GET_AD9253_TEST_WORD_NUM;
                 else next_state = IDLE;
             end
 
@@ -366,6 +433,16 @@ module slow_control_manager #(
                 else next_state = SEND_TEST_DATA;
             end
 
+            GET_AD9253_TEST_WORD_NUM: begin
+                if (rx_use) next_state = READ_AD9253_TEST_WORD;
+                else next_state = GET_AD9253_TEST_WORD_NUM;
+            end
+
+            READ_AD9253_TEST_WORD: begin
+                if (send_phase == 1'b1) next_state = IDLE;
+                else next_state = READ_AD9253_TEST_WORD;
+            end
+
             GET_DAC128S085_NUM: begin
                 if (rx_use) next_state = RECEIVE_DAC128S085_CONF_DATA;
                 else next_state = GET_DAC128S085_NUM;
@@ -454,11 +531,13 @@ module slow_control_manager #(
 
             ad9253_config_done <= 0;
 
-            idelay_tap <= 0;
             idelay_ld <= 0;
             idelay_time_cnt <= 0;
             idelay_done <= 0;
             idelay_flag <= 0;
+            idelay_write_index <= 6'd0;
+            idelay_write_data <= 5'd0;
+            idelay_write_req <= 1'b0;
 
             tdc_cali_done <= 0;
             cali_flag <= 0;
@@ -469,6 +548,7 @@ module slow_control_manager #(
             send_phase <= 1'b0;
         end else begin
             slow_control_wr_en <= 1'b0;
+            idelay_write_req <= 1'b0;
             case (state)
                 IDLE: begin
                     si5345_conf_bytes <= 0;
@@ -495,6 +575,7 @@ module slow_control_manager #(
                     ad9253_fco_cnt <= 0;
                     ad9253_num <= 0;
                     ad9253_bit_slip_num <= 0;
+                    ad9253_test_word_num <= 0;
                     ad9253_idelay_num <= 0;
 
                     dac128s085_data_in_buffer <= 0;
@@ -797,6 +878,8 @@ module slow_control_manager #(
                 GET_AD9253_BIT_SLIP_NUM: begin
                     if (rx_use) begin
                         ad9253_bit_slip_num <= rx_data;
+                        ad9253_fco_cnt      <= 0;
+                        bitslip_chx         <= 0;
                     end
                 end
 
@@ -808,7 +891,27 @@ module slow_control_manager #(
                 end
 
                 SEND_TEST_DATA: begin
+                    bitslip_chx   <= 0;
                     slow_control_data <= {8'b0, ad9253_data_chx[ad9253_bit_slip_num*8+:8]};
+                    if (send_phase == 1'b0) begin
+                        slow_control_wr_en <= 1'b1;
+                        send_phase         <= 1'b1;
+                    end else begin
+                        slow_control_wr_en <= 1'b0;
+                        send_phase         <= 1'b0;
+                    end
+                end
+
+                GET_AD9253_TEST_WORD_NUM: begin
+                    if (rx_use) begin
+                        ad9253_test_word_num <= rx_data;
+                    end
+                end
+
+                READ_AD9253_TEST_WORD: begin
+                    slow_control_data <= ad9253_data_chx[
+                        (ad9253_test_word_num >> 1) * 16 +: 16
+                    ];
                     if (send_phase == 1'b0) begin
                         slow_control_wr_en <= 1'b1;
                         send_phase         <= 1'b1;
@@ -826,7 +929,9 @@ module slow_control_manager #(
 
                 IDELAY: begin
                     if (rx_use) begin
-                        idelay_tap[ad9253_idelay_num*5+:5] <= rx_data;
+                        idelay_write_index <= ad9253_idelay_num[5:0];
+                        idelay_write_data <= rx_data[4:0];
+                        idelay_write_req  <= 1'b1;
                         idelay_ld <= 1;
                         idelay_flag <= 1;
                     end

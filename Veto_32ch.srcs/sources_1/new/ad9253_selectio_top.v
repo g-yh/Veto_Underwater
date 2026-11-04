@@ -222,7 +222,21 @@ module ad9253_selectio_top (
 
     wire [  7:0] async_fifo_full;
     wire [  7:0] async_fifo_empty;
+    wire [  7:0] async_fifo_wr_rst_busy;
+    wire [  7:0] async_fifo_rd_rst_busy;
+    wire [  7:0] async_fifo_ready;
     wire [511:0] ad9253_data_async;
+
+    genvar fifo_ready_idx;
+    generate
+        for (fifo_ready_idx = 0; fifo_ready_idx < 8;
+             fifo_ready_idx = fifo_ready_idx + 1) begin : gen_async_fifo_ready
+            assign async_fifo_ready[fifo_ready_idx] =
+                adc_reset_n[fifo_ready_idx] &&
+                !async_fifo_wr_rst_busy[fifo_ready_idx] &&
+                !async_fifo_rd_rst_busy[fifo_ready_idx];
+        end
+    endgenerate
 
     // ADC1
     assign ad9253_data_async[63:0] = {
@@ -312,13 +326,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[0]),    // input wire wr_clk
         .rd_clk     (adc_fco),                  // input wire rd_clk
         .din        (ad9253_data_async[63:0]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                     // input wire wr_en
-        .rd_en      (~async_fifo_empty[0]),     // input wire rd_en
+        .wr_en      (async_fifo_ready[0]),      // input wire wr_en
+        .rd_en      (async_fifo_ready[0] && ~async_fifo_empty[0]),
         .dout       (ad9253_data_chx[63:0]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[0]),       // output wire full
         .empty      (async_fifo_empty[0]),      // output wire empty
-        .wr_rst_busy(),                         // output wire wr_rst_busy
-        .rd_rst_busy()                          // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[0]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[0])
     );
 
     // ADC3
@@ -409,13 +423,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[0]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[191:128]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                        // input wire wr_en
-        .rd_en      (~async_fifo_empty[2]),        // input wire rd_en
+        .wr_en      (async_fifo_ready[2]),         // input wire wr_en
+        .rd_en      (async_fifo_ready[2] && ~async_fifo_empty[2]),
         .dout       (ad9253_data_chx[191:128]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[2]),          // output wire full
         .empty      (async_fifo_empty[2]),         // output wire empty
-        .wr_rst_busy(),                            // output wire wr_rst_busy
-        .rd_rst_busy()                             // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[2]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[2])
     );
 
     // ADC2
@@ -506,13 +520,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[1]),      // input wire wr_clk
         .rd_clk     (adc_fco),                    // input wire rd_clk
         .din        (ad9253_data_async[127:64]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                       // input wire wr_en
-        .rd_en      (~async_fifo_empty[1]),       // input wire rd_en
+        .wr_en      (async_fifo_ready[1]),        // input wire wr_en
+        .rd_en      (async_fifo_ready[1] && ~async_fifo_empty[1]),
         .dout       (ad9253_data_chx[127:64]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[1]),         // output wire full
         .empty      (async_fifo_empty[1]),        // output wire empty
-        .wr_rst_busy(),                           // output wire wr_rst_busy
-        .rd_rst_busy()                            // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[1]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[1])
     );
 
     // ADC4
@@ -603,13 +617,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[1]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[255:192]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                        // input wire wr_en
-        .rd_en      (~async_fifo_empty[3]),        // input wire rd_en
+        .wr_en      (async_fifo_ready[3]),         // input wire wr_en
+        .rd_en      (async_fifo_ready[3] && ~async_fifo_empty[3]),
         .dout       (ad9253_data_chx[255:192]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[3]),          // output wire full
         .empty      (async_fifo_empty[3]),         // output wire empty
-        .wr_rst_busy(),                            // output wire wr_rst_busy
-        .rd_rst_busy()                             // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[3]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[3])
     );
 
     // ADC5
@@ -700,13 +714,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[2]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[319:256]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                        // input wire wr_en
-        .rd_en      (~async_fifo_empty[4]),        // input wire rd_en
+        .wr_en      (async_fifo_ready[4]),         // input wire wr_en
+        .rd_en      (async_fifo_ready[4] && ~async_fifo_empty[4]),
         .dout       (ad9253_data_chx[319:256]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[4]),          // output wire full
         .empty      (async_fifo_empty[4]),         // output wire empty
-        .wr_rst_busy(),                            // output wire wr_rst_busy
-        .rd_rst_busy()                             // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[4]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[4])
     );
 
     // ADC7
@@ -797,13 +811,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[2]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[447:384]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                        // input wire wr_en
-        .rd_en      (~async_fifo_empty[6]),        // input wire rd_en
+        .wr_en      (async_fifo_ready[6]),         // input wire wr_en
+        .rd_en      (async_fifo_ready[6] && ~async_fifo_empty[6]),
         .dout       (ad9253_data_chx[447:384]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[6]),          // output wire full
         .empty      (async_fifo_empty[6]),         // output wire empty
-        .wr_rst_busy(),                            // output wire wr_rst_busy
-        .rd_rst_busy()                             // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[6]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[6])
     );
 
     // ADC6
@@ -894,13 +908,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[3]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[383:320]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                        // input wire wr_en
-        .rd_en      (~async_fifo_empty[5]),        // input wire rd_en
+        .wr_en      (async_fifo_ready[5]),         // input wire wr_en
+        .rd_en      (async_fifo_ready[5] && ~async_fifo_empty[5]),
         .dout       (ad9253_data_chx[383:320]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[5]),          // output wire full
         .empty      (async_fifo_empty[5]),         // output wire empty
-        .wr_rst_busy(),                            // output wire wr_rst_busy
-        .rd_rst_busy()                             // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[5]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[5])
     );
 
     // ADC8
@@ -991,13 +1005,13 @@ module ad9253_selectio_top (
         .wr_clk     (ad9253_clk_div_out[3]),       // input wire wr_clk
         .rd_clk     (adc_fco),                     // input wire rd_clk
         .din        (ad9253_data_async[511:448]),  // input wire [63 : 0] din
-        .wr_en      (1'b1),                        // input wire wr_en
-        .rd_en      (~async_fifo_empty[7]),        // input wire rd_en
+        .wr_en      (async_fifo_ready[7]),         // input wire wr_en
+        .rd_en      (async_fifo_ready[7] && ~async_fifo_empty[7]),
         .dout       (ad9253_data_chx[511:448]),    // output wire [63 : 0] dout
         .full       (async_fifo_full[7]),          // output wire full
         .empty      (async_fifo_empty[7]),         // output wire empty
-        .wr_rst_busy(),                            // output wire wr_rst_busy
-        .rd_rst_busy()                             // output wire rd_rst_busy
+        .wr_rst_busy(async_fifo_wr_rst_busy[7]),
+        .rd_rst_busy(async_fifo_rd_rst_busy[7])
     );
 
     // ila_0 ila_ad9253_top_inst (

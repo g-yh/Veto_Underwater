@@ -254,6 +254,32 @@ module main_32ch (
     wire adc_fco;
     assign adc_fco = clk_rxoutclk_bufg;
 
+    // IDELAYCTRL lock is generated in the ADC DCO groups. Synchronize it
+    // before using it to qualify the ADC read-side FIFO reset.
+    (* ASYNC_REG = "TRUE" *) reg [3:0] delay_locked_rx_meta;
+    (* ASYNC_REG = "TRUE" *) reg [3:0] delay_locked_rx_sync;
+    always @(posedge adc_fco) begin
+        if (!rst_rx_n) begin
+            delay_locked_rx_meta <= 4'd0;
+            delay_locked_rx_sync <= 4'd0;
+        end else begin
+            delay_locked_rx_meta <= delay_locked_dbg;
+            delay_locked_rx_sync <= delay_locked_rx_meta;
+        end
+    end
+
+    // SelectIO group -> ADC mapping:
+    // group0: ADC0/2, group1: ADC1/3, group2: ADC4/6, group3: ADC5/7.
+    wire [7:0] adc_delay_locked_ready;
+    assign adc_delay_locked_ready[0] = delay_locked_rx_sync[0];
+    assign adc_delay_locked_ready[1] = delay_locked_rx_sync[1];
+    assign adc_delay_locked_ready[2] = delay_locked_rx_sync[0];
+    assign adc_delay_locked_ready[3] = delay_locked_rx_sync[1];
+    assign adc_delay_locked_ready[4] = delay_locked_rx_sync[2];
+    assign adc_delay_locked_ready[5] = delay_locked_rx_sync[3];
+    assign adc_delay_locked_ready[6] = delay_locked_rx_sync[2];
+    assign adc_delay_locked_ready[7] = delay_locked_rx_sync[3];
+
     wire trigger_reset_n_rx;
     reset_sync u_reset_sync_trigger_rx (
         .clk   (adc_fco),
@@ -263,8 +289,11 @@ module main_32ch (
 
     // Per-channel software enable mask (ADC0 ch0 is channel index 0).
     wire [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_enable_rx;
-    wire adc_stream_data_reset_n = trigger_reset_n_rx;
-    wire adc_global_data_reset_n = trigger_reset_n_rx;
+    // Event acquisition path reset. This deliberately does not reset the
+    // ADC capture FIFOs, so ad9253_data_chx remains observable while the
+    // event path is stopped.
+    wire adc_stream_data_reset_n = trigger_reset_n_rx && gt_link_up;
+    wire adc_global_data_reset_n = adc_stream_data_reset_n;
 
     wire [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_data_ready_n;
     genvar adc_sw_rst;
@@ -302,7 +331,8 @@ module main_32ch (
             assign adc_channel_reset_n[adc_rst_ch] =
                 adc_stream_data_reset_n &&
                 adc_channel_data_ready_n[adc_rst_ch] &&
-                adc_config_reset_n[adc_rst_ch / CHANNEL_NUM];
+                adc_config_reset_n[adc_rst_ch / CHANNEL_NUM] &&
+                adc_delay_locked_ready[adc_rst_ch / CHANNEL_NUM];
         end
     endgenerate
 
@@ -310,12 +340,13 @@ module main_32ch (
     generate
         for (adc_selio_rst = 0; adc_selio_rst < ADC_NUM;
              adc_selio_rst = adc_selio_rst + 1) begin : gen_adc_selectio_reset
-            // Channel enable belongs to acquisition/event gating. Keep the
-            // SelectIO FIFO alive so F4/F8 bitslip diagnostics still work for
-            // ADC groups that are temporarily masked from event readout.
+            // The ADC capture FIFO is independent of trig_rst_n and channel
+            // enable. It remains alive so ILA and F4/F8 diagnostics can see
+            // live ADC data even while event acquisition is stopped.
             assign adc_selectio_fifo_reset_n[adc_selio_rst] =
-                adc_stream_data_reset_n &&
-                adc_config_reset_n[adc_selio_rst];
+                gt_link_up &&
+                adc_config_reset_n[adc_selio_rst] &&
+                adc_delay_locked_ready[adc_selio_rst];
         end
     endgenerate
 
@@ -758,7 +789,7 @@ module main_32ch (
         end else begin
             adc_trigger_ready_tx_sync <=
                 {adc_trigger_ready_tx_sync[0],
-                 trigger_reset_n_rx};
+                 adc_stream_data_reset_n};
         end
     end
     wire adc_trigger_ready_tx = adc_trigger_ready_tx_sync[1];
@@ -1024,15 +1055,11 @@ module main_32ch (
     );
 
     // All ILA status probes are registered in the ILA's RXOUTCLK domain.
-    (* ASYNC_REG = "TRUE" *) reg [3:0] delay_locked_rx_meta;
-    (* ASYNC_REG = "TRUE" *) reg [3:0] delay_locked_rx_sync;
     (* ASYNC_REG = "TRUE" *) reg adc_selectio_reset_n_meta;
     (* ASYNC_REG = "TRUE" *) reg adc_selectio_reset_n_rx;
     (* ASYNC_REG = "TRUE" *) reg si5345_lolb_meta;
     (* ASYNC_REG = "TRUE" *) reg si5345_lolb_rx;
     always @(posedge clk_rxoutclk_bufg) begin
-        delay_locked_rx_meta <= delay_locked_dbg;
-        delay_locked_rx_sync <= delay_locked_rx_meta;
         adc_selectio_reset_n_meta <= adc_selectio_reset_n;
         adc_selectio_reset_n_rx   <= adc_selectio_reset_n_meta;
         si5345_lolb_meta <= si5345_lolb;

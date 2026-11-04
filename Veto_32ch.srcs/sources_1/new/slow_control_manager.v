@@ -79,7 +79,11 @@ module slow_control_manager #(
 
     // Per-acquisition-channel enable mask.  Bit N controls ADC N/4 channel N%4.
     // A cleared bit holds only that channel's trigger/data path in reset.
-    output reg [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_enable
+    output reg [ADC_NUM*CHANNEL_NUM-1:0] adc_channel_enable,
+
+    // Runtime ring-buffer window configuration, in ADC sample clocks.
+    output reg [7:0] ringbuffer_trig_pre,
+    output reg [7:0] ringbuffer_trig_post
 );
 
     //--------------------------------
@@ -107,7 +111,7 @@ module slow_control_manager #(
     // brd_num 锁存 + 板号匹配
     reg brd_num_set;
     wire rx_addr_valid = (rx_addr >= 8'd1) && (rx_addr <= 8'd8);
-    wire rx_is_command = (rx_data >= 8'hF0) && (rx_data <= 8'hF8);
+    wire rx_is_command = (rx_data >= 8'hF0) && (rx_data <= 8'hF9);
     wire rx_adc_channel_cmd_addr =
         (rx_addr >= 8'h90) && (rx_addr <= 8'h9F);
     wire rx_adc_channel_cmd =
@@ -197,6 +201,8 @@ module slow_control_manager #(
     localparam TDC_CALI_SEND_DATA = 6'd26;
     localparam GET_AD9253_TEST_WORD_NUM = 6'd27;
     localparam READ_AD9253_TEST_WORD = 6'd28;
+    localparam GET_RINGBUFFER_TRIG_PRE = 6'd29;
+    localparam GET_RINGBUFFER_TRIG_POST = 6'd30;
 
     // reg  [ 5:0] state;
     // reg  [ 5:0] next_state;
@@ -332,6 +338,8 @@ module slow_control_manager #(
                 else if (rx_use && rx_data == 8'hF7) next_state = GET_TDC_NUM;
                 else if (rx_use && rx_data == 8'hF8)
                     next_state = GET_AD9253_TEST_WORD_NUM;
+                else if (rx_use && rx_data == 8'hF9)
+                    next_state = GET_RINGBUFFER_TRIG_PRE;
                 else next_state = IDLE;
             end
 
@@ -443,6 +451,16 @@ module slow_control_manager #(
                 else next_state = READ_AD9253_TEST_WORD;
             end
 
+            GET_RINGBUFFER_TRIG_PRE: begin
+                if (rx_use) next_state = GET_RINGBUFFER_TRIG_POST;
+                else next_state = GET_RINGBUFFER_TRIG_PRE;
+            end
+
+            GET_RINGBUFFER_TRIG_POST: begin
+                if (rx_use) next_state = IDLE;
+                else next_state = GET_RINGBUFFER_TRIG_POST;
+            end
+
             GET_DAC128S085_NUM: begin
                 if (rx_use) next_state = RECEIVE_DAC128S085_CONF_DATA;
                 else next_state = GET_DAC128S085_NUM;
@@ -543,6 +561,8 @@ module slow_control_manager #(
             cali_flag <= 0;
             tdc_bin <= 0;
             tdc_num <= 0;
+            ringbuffer_trig_pre <= 8'd0;
+            ringbuffer_trig_post <= 8'd248;
 
             // 发送
             send_phase <= 1'b0;
@@ -918,6 +938,18 @@ module slow_control_manager #(
                     end else begin
                         slow_control_wr_en <= 1'b0;
                         send_phase         <= 1'b0;
+                    end
+                end
+
+                GET_RINGBUFFER_TRIG_PRE: begin
+                    if (rx_use) begin
+                        ringbuffer_trig_pre <= rx_data;
+                    end
+                end
+
+                GET_RINGBUFFER_TRIG_POST: begin
+                    if (rx_use) begin
+                        ringbuffer_trig_post <= rx_data;
                     end
                 end
 

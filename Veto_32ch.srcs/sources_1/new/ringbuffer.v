@@ -2,7 +2,6 @@ module ringbuffer #(
     parameter DATA_WIDTH  = 16,
     parameter DEPTH       = 4096,
     parameter HEAD_LENGTH = 5,
-    parameter TRIG_PRE    = 0,
     parameter TRIG_TOTAL  = 30,
     parameter CHANNEL_ID  = 0
 ) (
@@ -13,12 +12,15 @@ module ringbuffer #(
     input wire [           9:0] tdc_data,
     input wire                  trig,
     input wire [          47:0] time_cnt,
+    input wire [           7:0] trig_pre,
+    input wire [           7:0] trig_post,
 
     output reg [DATA_WIDTH-1:0] dout,
     output reg                  data_valid
 );
 
     reg                   busy;
+    reg                   post_wait;
 
     (* ram_style = "block" *)
     reg  [DATA_WIDTH-1:0] mem          [DEPTH-1:0];
@@ -32,12 +34,26 @@ module ringbuffer #(
     reg  [          31:0] trig_cnt;
     reg  [           2:0] rd_phase;
 
-    wire                  read_enable;
-
     reg  [           9:0] tdc_data_reg;
     reg  [          47:0] time_cnt_reg;
+    reg  [           7:0] post_count;
 
-    assign read_enable = rst_n ? trig : 1'b0;
+    // The metadata readout path contributes a fixed three-sample
+    // pipeline delay before the first ADC sample reaches dout.
+    localparam [7:0] POST_START_LATENCY = 8'd3;
+
+    wire trigger_fire =
+        rst_n && trig && !busy && !post_wait;
+    wire trigger_immediate =
+        (trig_pre != 8'd0) ||
+        (trig_post <= POST_START_LATENCY);
+    wire [7:0] post_wait_cycles =
+        (trig_post > POST_START_LATENCY)
+            ? (trig_post - POST_START_LATENCY)
+            : 8'd0;
+    wire [8:0] post_count_next = {1'b0, post_count} + 9'd1;
+    wire post_done =
+        post_wait && (post_count_next >= {1'b0, post_wait_cycles});
 
     reg [DATA_WIDTH-1:0] temp_out;
     always @(posedge clk) begin
@@ -51,7 +67,7 @@ module ringbuffer #(
             wr_ptr <= 0;
         end else begin
             rd_ptr <= rd_ptr + 1;
-            wr_ptr <= rd_ptr + TRIG_PRE + HEAD_LENGTH;
+            wr_ptr <= rd_ptr + trig_pre + HEAD_LENGTH;
         end
     end
 
@@ -65,18 +81,42 @@ module ringbuffer #(
             dout       <= 0;
             read_count <= 0;
             busy       <= 0;
+            post_wait  <= 0;
+            post_count <= 0;
             rd_phase   <= 0;
             trig_cnt   <= 0;
         end else begin
             // ------------------------------
-            // Trigger read
+            // Latch trigger metadata.  A non-zero trig_pre keeps the
+            // previous immediate-read behaviour.  Otherwise trig_post
+            // selects a delayed window relative to the trigger.
             // ------------------------------
-            if (read_enable && !busy) begin
-                busy         <= 1'b1;
-                read_count   <= 0;
-                rd_phase     <= 0;
+            if (trigger_fire) begin
                 tdc_data_reg <= tdc_data;
                 time_cnt_reg <= time_cnt;
+
+                if (trigger_immediate) begin
+                    busy       <= 1'b1;
+                    read_count <= 0;
+                    rd_phase   <= 0;
+                end else begin
+                    post_wait  <= 1'b1;
+                    post_count <= 8'd0;
+                end
+            end
+
+            // Delay only the ADC window start; metadata remains from the
+            // original trigger edge.
+            if (post_wait) begin
+                if (post_done) begin
+                    post_wait  <= 1'b0;
+                    post_count <= 8'd0;
+                    busy       <= 1'b1;
+                    read_count <= 0;
+                    rd_phase   <= 0;
+                end else begin
+                    post_count <= post_count_next[7:0];
+                end
             end
 
             // ------------------------------

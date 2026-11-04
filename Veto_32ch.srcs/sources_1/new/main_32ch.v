@@ -88,7 +88,6 @@ module main_32ch (
     localparam ADC_NUM = 4'd8;
     localparam CHANNEL_NUM = 4'd4;
     localparam TRIG_TOTAL = 16'd57;
-    localparam TRIG_PRE = 16'd10;
     localparam HEAD_LEN = 16'd7;
 
     wire gt_link_up;
@@ -478,6 +477,8 @@ module main_32ch (
     wire [   ADC_NUM*CHANNEL_NUM-1:0] ringbuffer_trig;
     wire [ADC_NUM*CHANNEL_NUM*16-1:0] ringbuffer_out;
     wire [   ADC_NUM*CHANNEL_NUM-1:0] ringbuffer_data_valid;
+    wire [7:0] ringbuffer_trig_pre;
+    wire [7:0] ringbuffer_trig_post;
 
     genvar rb_idx;
     generate
@@ -492,7 +493,6 @@ module main_32ch (
                 .DATA_WIDTH (16),
                 .DEPTH      (4096),
                 .HEAD_LENGTH(HEAD_LEN),
-                .TRIG_PRE   (TRIG_PRE),
                 .TRIG_TOTAL (TRIG_TOTAL),
                 .CHANNEL_ID (rb_idx)
             ) ringbuffer_inst (
@@ -502,6 +502,8 @@ module main_32ch (
                 .tdc_data  (tdc_raw_rise[rb_idx*11+:10]),
                 .time_cnt  (ptp_timestamp_rx[47:0]),
                 .trig      (ringbuffer_trig[rb_idx]),
+                .trig_pre  (ringbuffer_trig_pre),
+                .trig_post (ringbuffer_trig_post),
                 .dout      (ringbuffer_out[rb_idx*16+:16]),
                 .data_valid(ringbuffer_data_valid[rb_idx])
             );
@@ -943,7 +945,9 @@ module main_32ch (
 
         .state(sc_state),
         .next_state(sc_next_state),
-        .adc_channel_enable(adc_channel_enable_rx)
+        .adc_channel_enable(adc_channel_enable_rx),
+        .ringbuffer_trig_pre(ringbuffer_trig_pre),
+        .ringbuffer_trig_post(ringbuffer_trig_post)
     );
 
     // ack_req 跨时钟域（rxoutclk -> txoutclk）：用异步 fifo_ack 代替单周期脉冲两级同步

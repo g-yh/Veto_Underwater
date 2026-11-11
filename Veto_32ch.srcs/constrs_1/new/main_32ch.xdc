@@ -534,3 +534,9 @@ set_property PACKAGE_PIN H1 [get_ports SFP1_tx_n]
 # led debug
 set_property PACKAGE_PIN R19 [get_ports gt_link_up_out_led]
 set_property IOSTANDARD LVCMOS33 [get_ports gt_link_up_out_led]
+
+set_property IOSTANDARD LVCMOS33 [get_ports debug_uw_t2]
+set_property PACKAGE_PIN T20 [get_ports debug_uw_t2]
+
+set_property IOSTANDARD LVCMOS33 [get_ports debug_uw_t3]
+set_property PACKAGE_PIN P28 [get_ports debug_uw_t3]

@@ -368,7 +368,8 @@ module ptp_manager (
                     // t2 t3, slave
                     states_ptp_tx <= 2;
                     timestamp_t3_data <= timestamp_t3_buffer;
-                    // tdc_phase_results_tx_data <= tdc_phase_results_tx;
+                    // Freeze one coherent TDC pair for the whole 4-word frame.
+                    tdc_phase_results_tx_data <= tdc_phase_results_tx;
                 end
                 // idle
                 counter_ptp_tx <= 0;
@@ -395,7 +396,6 @@ module ptp_manager (
                 ptp_working <= 1;
                 counter_ptp_tx <= counter_ptp_tx + 1;
                 ptp_t3_valid <= 1;
-                tdc_phase_results_tx_data <= tdc_phase_results_tx;
                 case (counter_ptp_tx)
                     0: begin
                         tx_data_ptp   <= 16'h3cf7;
@@ -499,7 +499,8 @@ module ptp_manager (
                         states_ptp_rx <= 2;
                         timestamp_t4_data <= timestamp_t4_buffer;
                         rx_data_is_ptp <= 1;
-                        // tdc_phase_results_rx_data <= tdc_phase_results_rx;
+                        // Freeze one coherent TDC pair for this transaction.
+                        tdc_phase_results_rx_data <= tdc_phase_results_rx;
                     end else if (gt_rx_data == 16'h5cf7) begin
                         // t5, slave
                         states_ptp_rx  <= 3;
@@ -527,7 +528,6 @@ module ptp_manager (
                 counter_ptp_rx <= counter_ptp_rx + 1;
                 rx_data_is_ptp <= 1;
                 ptp_t4_valid <= 1;
-                tdc_phase_results_rx_data <= tdc_phase_results_rx;
                 case (counter_ptp_rx)
                     0:  timestamp_t2_received[63:48] <= gt_rx_data;
                     1:  timestamp_t2_received[47:32] <= gt_rx_data;

@@ -82,8 +82,14 @@ module main_32ch (
     output wire SFP_tx_disable1,  // set low
     output wire SFP_tx_disable2,  // set low
 
-    output wire gt_link_up_out_led    // GT link established
+    output wire gt_link_up_out_led,    // GT link established
+
+    output wire debug_uw_t2,
+    output wire debug_uw_t3
 );
+
+    assign debug_uw_t2 = ptp_flags[1];
+    assign debug_uw_t3 = ptp_flags[2];
 
     localparam ADC_NUM = 4'd8;
     localparam CHANNEL_NUM = 4'd4;
@@ -488,7 +494,7 @@ module main_32ch (
             assign tdc_signal[tdc_gen] = cali_flag[tdc_gen] ? cali_pulse : max40026_ch[tdc_gen];
 
             lib_tdc #(
-                .N_carry4   (175),  // 25 carry4 per nanosecond
+                .N_carry4   (200),  // 25 carry4 per nanosecond
                 .N_bins_bits(10)     // = log2(4*N_carry4)
             ) instance_tdc (
                 .clk(adc_fco),  // input clock
@@ -1093,14 +1099,7 @@ module main_32ch (
         .probe22(sc_state),
         .probe23(sc_next_state),
         .probe24(ack_req_raw),
-        .probe25({
-            ad9253_config_done[7:0],
-            delay_locked_rx_sync,
-            adc_selectio_reset_n_rx,
-            rst_rx_n,
-            si5345_lolb_rx,
-            trigger_reset_n_rx
-        })
+        .probe25(gt_link_up)
     );
 
     ila_txout u_ila_txout (

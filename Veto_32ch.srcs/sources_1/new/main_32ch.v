@@ -918,6 +918,29 @@ module main_32ch (
     wire ad9253_fco_rise;
     assign ad9253_fco_rise = (ad9253_fco_cnt_rx == 8'd0);
 
+    //------------------------------------------------------------------
+    // GT 链路插拔 -> 慢控管理器复位脉冲
+    //   光纤拔出/插回时 gt_link_up 会跳变，用它清一次慢控状态机，避免
+    //   突发写入中途卡死后整块板再也无法应答（需要拔电才能恢复）。
+    //------------------------------------------------------------------
+    reg [1:0]  gt_link_up_sync2;
+    reg [19:0] sc_rst_hold;
+
+    always @(posedge clk_rxoutclk_bufg or negedge rst_rx_n) begin
+        if (!rst_rx_n) begin
+            gt_link_up_sync2 <= 2'b00;
+            sc_rst_hold      <= 20'hFFFFF;
+        end else begin
+            gt_link_up_sync2 <= {gt_link_up_sync2[0], gt_link_up};
+            if (gt_link_up_sync2[1] ^ gt_link_up_sync2[0])
+                sc_rst_hold <= 20'hFFFFF;
+            else if (sc_rst_hold != 20'd0)
+                sc_rst_hold <= sc_rst_hold - 20'd1;
+        end
+    end
+
+    wire sc_rst_n = rst_rx_n && (sc_rst_hold == 20'd0);
+
     wire ack_req_raw;
     slow_control_manager #(
         .ADC_NUM(ADC_NUM),
@@ -925,7 +948,7 @@ module main_32ch (
     ) u_slow_control_manager (
         .clk  (clk_rxoutclk_bufg),
         .clk_tx (clk_txoutclk_bufg),
-        .rst_n(rst_rx_n),
+        .rst_n(sc_rst_n),
 
         // GT 慢控收发接口
         .user_rx_data       (user_rx_data),

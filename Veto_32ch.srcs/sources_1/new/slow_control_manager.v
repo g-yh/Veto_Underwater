@@ -292,9 +292,21 @@ module slow_control_manager #(
      // 状态寄存器
     // 看门狗：state 停留超过 5 秒无变化则强制回 IDLE
     localparam TIMEOUT_CYCLES = CLK_FREQ * 5;  // 5 秒 = 625,000,000 @125MHz
+    // SPI 相關狀態只需要微秒級時間，1 ms 已經非常寬鬆；出現異常時能快速回到 IDLE，
+    // 而不是讓整個慢控通道卡 5 秒。
+    localparam SPI_TIMEOUT_CYCLES = CLK_FREQ / 1000;
+    wire wd_spi_state = (state == CONFIG_SI5345) ||
+                        (state == READ_SI5345_REG) ||
+                        (state == CONFIG_AD9253) ||
+                        (state == READ_AD9253_REG) ||
+                        (state == CONFIG_DAC128S085) ||
+                        (state == AD9253_BIT_SLIP) ||
+                        (state == SEND_TEST_DATA);
     reg [31:0] wd_cnt;
     reg [ 5:0] state_d;
-    wire       wd_timeout = (wd_cnt >= TIMEOUT_CYCLES);
+    wire [31:0] wd_limit = wd_spi_state ? SPI_TIMEOUT_CYCLES
+                                     : TIMEOUT_CYCLES;
+    wire       wd_timeout = (wd_cnt >= wd_limit);
 
     always @(posedge clk) begin
         if (!rst_n) begin

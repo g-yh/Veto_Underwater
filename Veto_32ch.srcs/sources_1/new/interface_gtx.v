@@ -92,6 +92,7 @@ module interface_gtx(
         // Transmit Ports - TX Data Path interface
         .gt0_txdata_in                  (gt_tx_data),
         .gt0_data_valid_in              (1'b1),
+        .gt0_rxslide_in                 (1'b0),
         // Transmit Ports - TX Driver and OOB signaling
         .gt0_gtxtxn_out                 (gtx_tx_n),
         .gt0_gtxtxp_out                 (gtx_tx_p),

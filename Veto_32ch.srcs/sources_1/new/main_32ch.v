@@ -85,11 +85,10 @@ module main_32ch (
     output wire gt_link_up_out_led,    // GT link established
 
     output wire debug_uw_t2,
-    output wire debug_uw_t3
+    output wire debug_uw_t3,
+    output wire clk_rx_mon,
+    output wire clk_tx_mon
 );
-
-    assign debug_uw_t2 = ptp_flags[1];
-    assign debug_uw_t3 = ptp_flags[2];
 
     localparam ADC_NUM = 4'd8;
     localparam CHANNEL_NUM = 4'd4;
@@ -694,6 +693,10 @@ module main_32ch (
     wire [3:0] ptp_flags;
     wire ptp_working;
 
+    // Debug pins: PTP flag bits from ptp_manager.
+    assign debug_uw_t2 = ptp_flags[1];
+    assign debug_uw_t3 = ptp_flags[2];
+
     //--------------------------------
     // slow control user data (via GT)
     //--------------------------------
@@ -1133,6 +1136,20 @@ module main_32ch (
         .probe24(ack_tx_cnt),
         .probe25(slow_control_data_valid)
     );
+    //--------------------------------
+    // GT recovered RX user clock monitor, 125 MHz.
+    //--------------------------------
+    OBUF instance_obuf_clk_rx_mon (
+        .I (clk_rxoutclk_bufg),
+        .O (clk_rx_mon)
+    );
+
+    OBUF instance_obuf_clk_tx_mon (
+        .I (clk_txoutclk_bufg),
+        .O (clk_tx_mon)
+    );
+
+
 endmodule
 
 module reset_sync (

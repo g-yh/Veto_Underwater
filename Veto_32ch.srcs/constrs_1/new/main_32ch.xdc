@@ -540,10 +540,3 @@ set_property PACKAGE_PIN T20 [get_ports debug_uw_t2]
 
 set_property IOSTANDARD LVCMOS33 [get_ports debug_uw_t3]
 set_property PACKAGE_PIN P28 [get_ports debug_uw_t3]
-
-# GT recovered RX user clock monitor, 125 MHz
-set_property PACKAGE_PIN P26 [get_ports clk_rx_mon]
-set_property IOSTANDARD LVCMOS33 [get_ports clk_rx_mon]
-
-set_property PACKAGE_PIN R26 [get_ports clk_tx_mon]
-set_property IOSTANDARD LVCMOS33 [get_ports clk_tx_mon]

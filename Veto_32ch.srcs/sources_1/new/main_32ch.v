@@ -85,10 +85,11 @@ module main_32ch (
     output wire gt_link_up_out_led,    // GT link established
 
     output wire debug_uw_t2,
-    output wire debug_uw_t3,
-    output wire clk_rx_mon,
-    output wire clk_tx_mon
+    output wire debug_uw_t3
 );
+
+    assign debug_uw_t2 = ptp_flags[1];
+    assign debug_uw_t3 = ptp_flags[2];
 
     localparam ADC_NUM = 4'd8;
     localparam CHANNEL_NUM = 4'd4;
@@ -693,10 +694,6 @@ module main_32ch (
     wire [3:0] ptp_flags;
     wire ptp_working;
 
-    // Debug pins: PTP flag bits from ptp_manager.
-    assign debug_uw_t2 = ptp_flags[1];
-    assign debug_uw_t3 = ptp_flags[2];
-
     //--------------------------------
     // slow control user data (via GT)
     //--------------------------------
@@ -918,53 +915,6 @@ module main_32ch (
     wire ad9253_fco_rise;
     assign ad9253_fco_rise = (ad9253_fco_cnt_rx == 8'd0);
 
-    //------------------------------------------------------------------
-    // GT 链路插拔 -> 慢控管理器复位脉冲
-    //   只有链路状态稳定保持 >= 10 ms 后再发生跳变（真正插拔光纤）才触发，
-    //   避免链路抖动把慢控反复复位。复位脉宽约 8.4 ms @125 MHz。
-    //------------------------------------------------------------------
-    reg        lu_sync1;
-    reg        lu_sync2;
-    reg        lu_prev;
-    reg [19:0] lu_stable;
-    reg [19:0] sc_rst_hold;
-    reg [27:0] sc_blank;
-
-    always @(posedge clk_rxoutclk_bufg or negedge rst_rx_n) begin
-        if (!rst_rx_n) begin
-            lu_sync1     <= 1'b0;
-            lu_sync2     <= 1'b0;
-            lu_prev      <= 1'b0;
-            lu_stable    <= 20'd0;
-            sc_rst_hold  <= 20'hFFFFF;
-            sc_blank     <= 28'd0;
-        end else begin
-            lu_sync1 <= gt_link_up;
-            lu_sync2 <= lu_sync1;
-
-            if (lu_sync2 != lu_prev) begin
-                if ((lu_stable >= 20'd1_000_000) && (sc_blank == 28'd0)) begin
-                    sc_rst_hold <= 20'hFFFFF;      // 稳定 10 ms 后跳变 = 真的插拔
-                    sc_blank    <= 28'd25_000_000; // 200 ms @125 MHz
-                end
-                lu_stable <= 20'd0;
-            end else begin
-                if (lu_stable != 20'hFFFFF) begin
-                    lu_stable <= lu_stable + 20'd1;
-                end
-                if (sc_rst_hold != 20'd0) begin
-                    sc_rst_hold <= sc_rst_hold - 20'd1;
-                end
-                if (sc_blank != 28'd0) begin
-                    sc_blank <= sc_blank - 28'd1;
-                end
-            end
-            lu_prev <= lu_sync2;
-        end
-    end
-
-    wire sc_rst_n = rst_rx_n && (sc_rst_hold == 20'd0);
-
     wire ack_req_raw;
     slow_control_manager #(
         .ADC_NUM(ADC_NUM),
@@ -972,7 +922,7 @@ module main_32ch (
     ) u_slow_control_manager (
         .clk  (clk_rxoutclk_bufg),
         .clk_tx (clk_txoutclk_bufg),
-        .rst_n(sc_rst_n),
+        .rst_n(rst_rx_n),
 
         // GT 慢控收发接口
         .user_rx_data       (user_rx_data),
@@ -1183,20 +1133,6 @@ module main_32ch (
         .probe24(ack_tx_cnt),
         .probe25(slow_control_data_valid)
     );
-    //--------------------------------
-    // GT recovered RX user clock monitor, 125 MHz.
-    //--------------------------------
-    OBUF instance_obuf_clk_rx_mon (
-        .I (clk_rxoutclk_bufg),
-        .O (clk_rx_mon)
-    );
-
-    OBUF instance_obuf_clk_tx_mon (
-        .I (clk_txoutclk_bufg),
-        .O (clk_tx_mon)
-    );
-
-
 endmodule
 
 module reset_sync (
